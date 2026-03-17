@@ -887,7 +887,7 @@ static void infer_pass(codegen_ctx_t *ctx, pm_node_t *node) {
 /* Pass 2b: Resolve ivar types from initialize call patterns          */
 /* ------------------------------------------------------------------ */
 
-static void resolve_class_types(codegen_ctx_t *ctx) {
+static void resolve_class_types(codegen_ctx_t *ctx, pm_node_t *prog_root) {
     /* For each class, determine ivar types from initialize body.
      * We need to resolve bottom-up: Vec first (has literal args),
      * then Sphere/Plane/Ray/Isect (have Vec args), then Scene. */
@@ -1048,6 +1048,69 @@ static void resolve_class_types(codegen_ctx_t *ctx) {
             }
             if (strcmp(f->name, "test_lists") == 0) {
                 f->return_type = vt_prim(SPINEL_TYPE_INTEGER);
+            }
+        }
+
+        /* Infer top-level function param types from call sites */
+        if (prog_root && PM_NODE_TYPE(prog_root) == PM_PROGRAM_NODE) {
+            pm_program_node_t *prog = (pm_program_node_t *)prog_root;
+            if (prog->statements) {
+                pm_statements_node_t *stmts = prog->statements;
+                for (size_t si = 0; si < stmts->body.size; si++) {
+                    pm_node_t *s = stmts->body.nodes[si];
+                    /* Look for call nodes that call our functions */
+                    if (PM_NODE_TYPE(s) == PM_CALL_NODE) {
+                        pm_call_node_t *call = (pm_call_node_t *)s;
+                        if (!call->receiver && call->arguments) {
+                            char *cname = cstr(ctx, call->name);
+                            func_info_t *target = find_func(ctx, cname);
+                            if (target) {
+                                for (int pi = 0; pi < target->param_count &&
+                                     pi < (int)call->arguments->arguments.size; pi++) {
+                                    if (target->params[pi].type.kind == SPINEL_TYPE_VALUE) {
+                                        vtype_t at = infer_type(ctx, call->arguments->arguments.nodes[pi]);
+                                        if (at.kind != SPINEL_TYPE_VALUE)
+                                            target->params[pi].type = at;
+                                    }
+                                }
+                            }
+                            free(cname);
+                        }
+                    }
+                    /* Also check calls nested in puts/print: puts fib(34) */
+                    if (PM_NODE_TYPE(s) == PM_CALL_NODE) {
+                        pm_call_node_t *outer = (pm_call_node_t *)s;
+                        if (outer->arguments) {
+                            for (size_t ai = 0; ai < outer->arguments->arguments.size; ai++) {
+                                pm_node_t *arg = outer->arguments->arguments.nodes[ai];
+                                if (PM_NODE_TYPE(arg) == PM_CALL_NODE) {
+                                    pm_call_node_t *inner = (pm_call_node_t *)arg;
+                                    if (!inner->receiver && inner->arguments) {
+                                        char *iname = cstr(ctx, inner->name);
+                                        func_info_t *target = find_func(ctx, iname);
+                                        if (target) {
+                                            for (int pi = 0; pi < target->param_count &&
+                                                 pi < (int)inner->arguments->arguments.size; pi++) {
+                                                if (target->params[pi].type.kind == SPINEL_TYPE_VALUE) {
+                                                    vtype_t at = infer_type(ctx, inner->arguments->arguments.nodes[pi]);
+                                                    if (at.kind != SPINEL_TYPE_VALUE)
+                                                        target->params[pi].type = at;
+                                                }
+                                            }
+                                            /* Infer return type from body if still VALUE */
+                                            if (target->return_type.kind == SPINEL_TYPE_VALUE &&
+                                                target->param_count > 0 &&
+                                                target->params[0].type.kind != SPINEL_TYPE_VALUE) {
+                                                target->return_type = target->params[0].type;
+                                            }
+                                        }
+                                        free(iname);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -2554,7 +2617,7 @@ void codegen_program(codegen_ctx_t *ctx, pm_node_t *root) {
     infer_pass(ctx, root);
 
     /* Pass 2b: Resolve class types */
-    resolve_class_types(ctx);
+    resolve_class_types(ctx, root);
 
     /* Pass 2c: Re-infer variable types now that function return types are resolved */
     infer_pass(ctx, root);
