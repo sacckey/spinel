@@ -9,44 +9,58 @@ No runtime dependencies (no mruby, no GC library — GC is generated inline).
 
 ## 現状 (Status)
 
-### 完了した機能
+### コンパイラアーキテクチャ (~5800行のC)
 
-**コンパイラアーキテクチャ** (~4000行のC)
 - Prism (libprism) によるRubyパース
 - 多パスコード生成:
-  1. クラス/モジュール/関数解析
-  2. 全変数・パラメータ・戻り値の型推論
-  3. C構造体・メソッド関数の生成
-  4. main()のトップレベルコード生成
-- マーク&スイープGC (シャドウスタックによるルート管理)
+  1. クラス/モジュール/関数解析 (継承チェーン解決含む)
+  2. 全変数・パラメータ・戻り値の型推論 (関数間解析)
+  3. C構造体・メソッド関数の生成 (GCスキャン関数含む)
+  4. ラムダ/クロージャのキャプチャ解析・コード生成
+  5. main()のトップレベルコード生成
+- マーク&スイープGC (シャドウスタック、ファイナライザ)
+- setjmp/longjmpベース例外処理
+- アリーナアロケータ (ラムダ/クロージャ用)
 
-**サポート済み言語機能**
+### サポート済み言語機能
 
 | カテゴリ | 機能 |
 |---------|------|
-| オブジェクト | クラス定義、インスタンス変数、メソッド定義、getter/setter自動インライン化 |
+| **OOP** | クラス定義、インスタンス変数、メソッド定義 |
+| | 継承 (`class Dog < Animal`)、`super` |
+| | getter/setter自動インライン化 |
 | | コンストラクタ (`.new`)、型付きオブジェクトへのメソッド呼び出し |
 | | モジュール (状態変数 + メソッド) |
-| 型 | Integer, Float, Boolean, String, nil → アンボックスCの型 |
+| **ブロック/クロージャ** | `yield`、ブロック付きメソッド呼び出し |
+| | `Array#each/map/select` (インライン化) |
+| | `Integer#times` with block → C forループ |
+| | `-> x { body }` ラムダ → Cクロージャ (キャプチャ解析) |
+| | sp_Val タグ付きユニオン + アリーナアロケータ |
+| **制御** | while, until, if/elsif/else, unless |
+| | case/when/else (値、複数値、Range条件) |
+| | break, next, return |
+| | ternary, and/or/not |
+| **例外処理** | begin/rescue/ensure/retry |
+| | raise "message" (setjmp/longjmp) |
+| | rescue => e (メッセージキャプチャ) |
+| **型** | Integer, Float, Boolean, String, nil → アンボックスC型 |
+| | Symbol → 文字列定数 |
 | | 値型 (Vec: 3 floats → 値渡し) vs ポインタ型 |
-| 配列 | sp_IntArray (push/pop/shift/dup/reverse!/empty?/length/[]/!=) |
+| | デフォルト引数 (`def foo(x = 10)`) |
+| **コレクション** | sp_IntArray (push/pop/shift/dup/reverse!/each/map/select) |
+| | sp_StrIntHash (文字列キー→整数値、each/has_key?/delete) |
 | | O(1) shift (デキュー方式のstartオフセット) |
-| クロージャ | `-> x { body }` ラムダ → Cクロージャ (キャプチャ解析) |
-| | sp_Val タグ付きユニオン (Proc/Int/Bool/Nil) |
-| | アリーナアロケータ (mmap、デマンドページング) |
-| 制御 | while, if/elsif/else, ternary, until |
-| | break, return, and/or/not |
-| | Integer#times with block → C forループ |
-| 演算 | 算術 (+, -, *, /, %), 比較, ビット演算 → 直接C演算子 |
+| **演算** | 算術 (+, -, *, /, %, **), 比較, ビット演算 |
 | | 単項マイナス, 複合代入 (+=, <<=) |
 | | Math.sqrt/cos/sin → C math関数 |
-| I/O | puts, print, printf, putc, p → stdio |
-| | 文字列補間 → printf |
-| | Integer#chr → putchar |
-| その他 | 並列代入, チェーン代入 (zr = zi = 0) |
-| | 定数 (グローバルスコープ), トップレベル関数 |
-| | 関数間型推論 (呼び出しサイトからのパラメータ型推論) |
-| GC | マーク&スイープ (非値型オブジェクト・配列用) |
+| | Integer#abs/even?/odd?/zero? |
+| | Float#abs/ceil/floor/round |
+| **文字列** | リテラル、補間 → printf |
+| | length, upcase, downcase, include?, + |
+| | Integer#to_s, Integer#chr |
+| **I/O** | puts, print, printf, putc, p → stdio |
+| | puts: Integer, Float, Boolean, String対応 |
+| **GC** | マーク&スイープ (非値型オブジェクト・配列・ハッシュ用) |
 | | シャドウスタックルート管理, ファイナライザ |
 | | GC不要なプログラムではGCコード省略 |
 
@@ -67,35 +81,32 @@ No runtime dependencies (no mruby, no GC library — GC is generated inline).
 
 ## 未サポート機能
 
-### 高優先度 (次のターゲット候補)
+### 高優先度
 
-| 機能 | 必要なベンチマーク例 | 難易度 |
-|------|-------------------|--------|
-| 継承 (`class Dog < Animal`) | OOP系ベンチマーク | 中 |
-| `yield` / 暗黙ブロック | each, map, select等 | 中 |
-| `case`/`when` | パターンマッチ系 | 低 |
-| `unless` | 一般的なRubyコード | 低 |
-| 例外処理 (`rescue`/`raise`) | エラーハンドリング系 | 中 |
-| Hash リテラル・操作 | 多くの実用プログラム | 中 |
-| Symbol | メソッド名、キー | 低〜中 |
-| `each` / `map` / `select` (配列) | Enumerable系 | 中 |
-| デフォルト引数 | `def foo(x = 10)` | 低 |
-| `super` | 継承チェーン | 中 |
+| 機能 | 備考 |
+|------|------|
+| `include` / `extend` (Mixin) | モジュール取り込み |
+| `attr_accessor` / `attr_reader` マクロ | 手動getter/setterは対応済み |
+| キーワード引数 | `def foo(name:, age:)` |
+| スプラット (`*args`, `**kwargs`) | 可変長引数 |
+| Regexp | パターンマッチ |
+| String メソッド追加 (gsub, split, match等) | 文字列処理 |
+| `Comparable`, `Enumerable` | モジュール組み込み |
+| `for..in` + Range | while版は対応済み |
+| `loop do` | while(1)で代替可 |
+| 多値 Hash (任意型value) | 現在はString→Integerのみ |
 
 ### 中優先度
 
 | 機能 | 備考 |
 |------|------|
-| String メソッド (gsub, split, match等) | 文字列処理 |
-| Regexp | パターンマッチ |
-| キーワード引数 | `def foo(name:, age:)` |
-| スプラット (`*args`, `**kwargs`) | 可変長引数 |
-| `attr_accessor` / `attr_reader` マクロ | 手動getter/setterは対応済み |
-| `include` / `extend` | Mixin |
-| `Comparable`, `Enumerable` | モジュール組み込み |
-| `for..in` + Range | while版は対応済み |
-| `loop do` | while(1)で代替可 |
-| `next` (ループ内) | continue相当 |
+| 多段継承チェーン | 現在は1段のみテスト済み |
+| Exception クラス定義 | 現在は文字列のみ |
+| `Struct` / `Data` | 簡易データクラス |
+| `Proc.new`, `proc {}`, `method(:name)` | lambda以外のProc |
+| `respond_to?`, `is_a?`, `class` | 型イントロスペクション |
+| クラスメソッド (`def self.foo`) | モジュールメソッドは対応済み |
+| `alias` | メソッド別名 |
 
 ### 低優先度 (動的機能)
 
@@ -122,27 +133,30 @@ Ruby Source (.rb)
 Prism (libprism)                -- パース → AST
     |
     v
-Pass 1: クラス解析              -- クラス、メソッド、インスタンス変数の検出
-    |
+Pass 1: クラス解析              -- クラス (継承チェーン)、メソッド、ivar検出
+    |                              モジュール、トップレベル関数、yield検出
     v
 Pass 2: 型推論                  -- 全変数・ivar・パラメータの型推論
-    |                              (Integer/Float/Boolean/Object/Array/Proc)
-    |                              関数間型推論 (呼び出しサイト解析)
+    |                              (Integer/Float/Boolean/String/Object/Array/Hash/Proc)
+    |                              関数間型推論、super型伝播、継承ivar伝播
     v
-Pass 3: 構造体・メソッド生成    -- クラス → C構造体
-    |                              メソッド → C関数 (直接呼び出し)
+Pass 3: 構造体・メソッド生成    -- クラス → C構造体 (親フィールド先頭配置)
+    |                              メソッド → C関数 (継承はcast-to-parent)
     |                              getter/setter → インラインフィールドアクセス
-    |                              GCスキャン関数生成
+    |                              GCスキャン関数、ファイナライザ生成
+    |                              ラムダ → キャプチャ解析 + C関数生成
     v
 Pass 4: main() コード生成       -- トップレベルコード → main()
-    |                              while/for/times → Cループ
+    |                              while/for/times/each → Cループ
+    |                              yield → コールバック関数ポインタ
     |                              算術 → C演算子
+    |                              rescue → setjmp/longjmp
     |                              puts/print/printf → stdio
     v
-スタンドアロンCファイル
+スタンドアロンCファイル           -- GC内蔵, 例外処理内蔵
     |
     v
-cc -O2 -lm → ネイティブバイナリ  -- mruby不要、GC内蔵、libc+libmのみ
+cc -O2 -lm → ネイティブバイナリ  -- mruby不要、libc+libmのみ
 ```
 
 ## ビルドフロー
@@ -168,14 +182,21 @@ spinel/
 ├── src/
 │   ├── main.c          # CLI、ファイル読み込み、Prismパース
 │   ├── codegen.h       # 型システム、クラス/メソッド/モジュール情報構造体
-│   └── codegen.c       # 多パスコード生成器 (~4000行)
-├── examples/
-│   ├── bm_so_mandelbrot.rb   # Mandelbrot集合
-│   ├── bm_ao_render.rb       # AOレイトレーサー (6クラス)
-│   ├── bm_so_lists.rb        # 配列操作
+│   └── codegen.c       # 多パスコード生成器 (~5800行)
+├── examples/           # 13テストプログラム
+│   ├── bm_so_mandelbrot.rb   # Mandelbrot集合 (whileループ、ビット演算)
+│   ├── bm_ao_render.rb       # AOレイトレーサー (6クラス、モジュール)
+│   ├── bm_so_lists.rb        # 配列操作 (push/pop/shift)
 │   ├── bm_fib.rb             # 再帰フィボナッチ
-│   ├── bm_app_lc_fizzbuzz.rb # λ計算FizzBuzz (1201ラムダ)
-│   └── bm_mandel_term.rb     # ターミナルMandelbrot
+│   ├── bm_app_lc_fizzbuzz.rb # λ計算FizzBuzz (1201クロージャ)
+│   ├── bm_mandel_term.rb     # ターミナルMandelbrot (関数間呼び出し)
+│   ├── bm_yield.rb           # yield/ブロック (each/map/select)
+│   ├── bm_case.rb            # case/when, unless, next, デフォルト引数
+│   ├── bm_inherit.rb         # 継承、super
+│   ├── bm_rescue.rb          # rescue/raise/ensure/retry
+│   ├── bm_hash.rb            # Hash操作
+│   ├── bm_strings.rb         # Symbol、文字列メソッド
+│   └── bm_numeric.rb         # 数値メソッド (abs, ceil, even?, **)
 ├── prototype/
 │   └── tools/          # Step 0プロトタイプ (RBS抽出、LumiTrace等)
 ├── Makefile
@@ -185,12 +206,14 @@ spinel/
 
 ## 次のステップ
 
-1. **継承サポート** — vtable不要のCHA証明済み直接呼び出し
-2. **yield/ブロック** — Integer#times以外のイテレータ対応
-3. **case/when** — Cのswitch文へ変換
-4. **例外処理** — setjmp/longjmpベースのrescue/raise
-5. **Hash** — 組み込みハッシュテーブル実装
-6. **LumiTraceプロファイル統合** — 型推論の精度向上
+1. **Mixin (`include`/`extend`)** — モジュールのメソッドをクラスに取り込み
+2. **キーワード引数** — `def foo(name:, age:)` 形式
+3. **スプラット** — `*args`, `**kwargs`
+4. **Regexp** — 正規表現 (PCRE or oniguruma)
+5. **String メソッド拡張** — gsub, split, match, sub, strip
+6. **多値Hash** — 任意型のvalue対応
+7. **LumiTraceプロファイル統合** — 型推論の精度向上
+8. **複数ファイルコンパイル** — require/load対応
 
 ## 参考情報
 
