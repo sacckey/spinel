@@ -69,6 +69,7 @@ typedef struct {
 /* Class info */
 #define MAX_IVARS 16
 #define MAX_METHODS 32
+#define MAX_INCLUDES 8
 typedef struct {
     char name[64];
     char superclass[64];   /* superclass name ("" if none) */
@@ -79,6 +80,8 @@ typedef struct {
     int method_count;
     bool is_value_type;    /* pass by value (small: e.g., Vec) */
     pm_node_t *class_node; /* AST node of the class definition */
+    char includes[MAX_INCLUDES][64]; /* included module names */
+    int include_count;
 } class_info_t;
 
 /* Module constant info */

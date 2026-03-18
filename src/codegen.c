@@ -499,6 +499,21 @@ static void analyze_class(codegen_ctx_t *ctx, pm_class_node_t *node) {
                     }
                 }
             }
+            /* include ModuleName — record for mixin resolution */
+            if (strcmp(cname, "include") == 0 && call->arguments) {
+                for (size_t ai = 0; ai < call->arguments->arguments.size; ai++) {
+                    pm_node_t *arg = call->arguments->arguments.nodes[ai];
+                    if (PM_NODE_TYPE(arg) == PM_CONSTANT_READ_NODE) {
+                        pm_constant_read_node_t *cr = (pm_constant_read_node_t *)arg;
+                        char *mname = cstr(ctx, cr->name);
+                        if (cls->include_count < MAX_INCLUDES) {
+                            snprintf(cls->includes[cls->include_count], 64, "%s", mname);
+                            cls->include_count++;
+                        }
+                        free(mname);
+                    }
+                }
+            }
             free(cname);
         }
     }
@@ -529,13 +544,36 @@ static void analyze_module(codegen_ctx_t *ctx, pm_module_node_t *node) {
         if (PM_NODE_TYPE(s) == PM_DEF_NODE) {
             pm_def_node_t *def = (pm_def_node_t *)s;
             method_info_t *m = &mod->methods[mod->method_count++];
+            memset(m, 0, sizeof(*m));
             char *name = cstr(ctx, def->name);
             snprintf(m->name, sizeof(m->name), "%s", name);
             free(name);
             m->body_node = def->body ? (pm_node_t *)def->body : NULL;
             m->params_node = def->parameters ? (pm_node_t *)def->parameters : NULL;
             m->param_count = 0;
-            m->return_type = vt_prim(SPINEL_TYPE_FLOAT); /* for Rand::rand */
+            m->return_type = vt_prim(SPINEL_TYPE_VALUE);
+
+            /* def self.foo → module function; def foo → mixin method */
+            if (def->receiver && PM_NODE_TYPE(def->receiver) == PM_SELF_NODE) {
+                m->is_class_method = true;
+                m->return_type = vt_prim(SPINEL_TYPE_FLOAT); /* for Rand::rand */
+            }
+
+            /* Parse parameters for mixin methods */
+            if (def->parameters) {
+                pm_parameters_node_t *params = def->parameters;
+                for (size_t pi = 0; pi < params->requireds.size && m->param_count < MAX_PARAMS; pi++) {
+                    pm_node_t *p = params->requireds.nodes[pi];
+                    if (PM_NODE_TYPE(p) == PM_REQUIRED_PARAMETER_NODE) {
+                        pm_required_parameter_node_t *rp = (pm_required_parameter_node_t *)p;
+                        char *pname = cstr(ctx, rp->name);
+                        snprintf(m->params[m->param_count].name, 64, "%s", pname);
+                        m->params[m->param_count].type = vt_prim(SPINEL_TYPE_VALUE);
+                        m->param_count++;
+                        free(pname);
+                    }
+                }
+            }
         } else if (PM_NODE_TYPE(s) == PM_INSTANCE_VARIABLE_WRITE_NODE) {
             pm_instance_variable_write_node_t *iw =
                 (pm_instance_variable_write_node_t *)s;
@@ -5104,9 +5142,11 @@ static void emit_module(codegen_ctx_t *ctx, module_info_t *mod) {
     }
     emit_raw(ctx, "\n");
 
-    /* Emit module methods */
+    /* Emit module methods (only module functions, not mixin methods) */
     for (int i = 0; i < mod->method_count; i++) {
         method_info_t *m = &mod->methods[i];
+        /* Skip mixin methods — they are emitted per-class via emit_method */
+        if (!m->is_class_method) continue;
         char *ret_ct = vt_ctype(ctx, m->return_type, false);
         emit_raw(ctx, "static %s sp_%s_%s(void) {\n", ret_ct, mod->name, m->name);
         free(ret_ct);
@@ -6221,6 +6261,25 @@ void codegen_program(codegen_ctx_t *ctx, pm_node_t *root) {
         /* For classes without their own initialize, inherit is_value_type from parent */
         if (!find_method(cls, "initialize")) {
             cls->is_value_type = parent->is_value_type;
+        }
+    }
+
+    /* Pass 1c: Resolve module includes — copy mixin methods into classes */
+    for (int ci = 0; ci < ctx->class_count; ci++) {
+        class_info_t *cls = &ctx->classes[ci];
+        for (int ii = 0; ii < cls->include_count; ii++) {
+            module_info_t *mod = find_module(ctx, cls->includes[ii]);
+            if (!mod) continue;
+            for (int mi = 0; mi < mod->method_count; mi++) {
+                method_info_t *mm = &mod->methods[mi];
+                /* Only copy instance methods (not def self.foo module functions) */
+                if (mm->is_class_method) continue;
+                /* Don't override methods the class already defines */
+                if (find_method(cls, mm->name)) continue;
+                if (cls->method_count >= MAX_METHODS) continue;
+                cls->methods[cls->method_count] = *mm;
+                cls->method_count++;
+            }
         }
     }
 
