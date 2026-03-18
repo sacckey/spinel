@@ -110,6 +110,7 @@ const char *spinel_type_cname(spinel_type_t k) {
     case SPINEL_TYPE_INTEGER: return "mrb_int";
     case SPINEL_TYPE_FLOAT:   return "mrb_float";
     case SPINEL_TYPE_BOOLEAN: return "mrb_bool";
+    case SPINEL_TYPE_STRING:  return "const char *";
     case SPINEL_TYPE_ARRAY:   return "sp_IntArray *";
     case SPINEL_TYPE_PROC:    return "sp_Val *";
     default:                  return "mrb_int"; /* fallback for standalone mode */
@@ -495,6 +496,7 @@ static void analyze_top_func(codegen_ctx_t *ctx, pm_def_node_t *def) {
 
     if (def->parameters) {
         pm_parameters_node_t *params = def->parameters;
+        /* Required parameters */
         for (size_t i = 0; i < params->requireds.size && f->param_count < MAX_PARAMS; i++) {
             pm_node_t *p = params->requireds.nodes[i];
             if (PM_NODE_TYPE(p) == PM_REQUIRED_PARAMETER_NODE) {
@@ -502,6 +504,20 @@ static void analyze_top_func(codegen_ctx_t *ctx, pm_def_node_t *def) {
                 char *pname = cstr(ctx, rp->name);
                 snprintf(f->params[f->param_count].name, 64, "%s", pname);
                 f->params[f->param_count].type = vt_prim(SPINEL_TYPE_VALUE);
+                f->param_count++;
+                free(pname);
+            }
+        }
+        /* Optional parameters (def foo(x = 10)) */
+        for (size_t i = 0; i < params->optionals.size && f->param_count < MAX_PARAMS; i++) {
+            pm_node_t *p = params->optionals.nodes[i];
+            if (PM_NODE_TYPE(p) == PM_OPTIONAL_PARAMETER_NODE) {
+                pm_optional_parameter_node_t *op = (pm_optional_parameter_node_t *)p;
+                char *pname = cstr(ctx, op->name);
+                snprintf(f->params[f->param_count].name, 64, "%s", pname);
+                f->params[f->param_count].type = infer_type(ctx, op->value);
+                f->params[f->param_count].is_optional = true;
+                f->params[f->param_count].default_node = op->value;
                 f->param_count++;
                 free(pname);
             }
@@ -816,6 +832,31 @@ static vtype_t infer_type(codegen_ctx_t *ctx, pm_node_t *node) {
         return n->statements ? infer_type(ctx, (pm_node_t *)n->statements) : vt_prim(SPINEL_TYPE_NIL);
     }
 
+    case PM_UNLESS_NODE: {
+        pm_unless_node_t *n = (pm_unless_node_t *)node;
+        vtype_t then_t = n->statements ? infer_type(ctx, (pm_node_t *)n->statements) : vt_prim(SPINEL_TYPE_NIL);
+        vtype_t else_t = n->else_clause ? infer_type(ctx, (pm_node_t *)n->else_clause) : vt_prim(SPINEL_TYPE_NIL);
+        if (then_t.kind == else_t.kind) return then_t;
+        return vt_prim(SPINEL_TYPE_VALUE);
+    }
+
+    case PM_CASE_NODE: {
+        pm_case_node_t *n = (pm_case_node_t *)node;
+        vtype_t result = vt_prim(SPINEL_TYPE_NIL);
+        for (size_t i = 0; i < n->conditions.size; i++) {
+            pm_node_t *cond = n->conditions.nodes[i];
+            if (PM_NODE_TYPE(cond) == PM_WHEN_NODE) {
+                pm_when_node_t *w = (pm_when_node_t *)cond;
+                if (w->statements) {
+                    vtype_t t = infer_type(ctx, (pm_node_t *)w->statements);
+                    if (i == 0) result = t;
+                    else if (result.kind != t.kind) result = vt_prim(SPINEL_TYPE_VALUE);
+                }
+            }
+        }
+        return result;
+    }
+
     case PM_STATEMENTS_NODE: {
         pm_statements_node_t *s = (pm_statements_node_t *)node;
         if (s->body.size == 0) return vt_prim(SPINEL_TYPE_NIL);
@@ -944,6 +985,26 @@ static void infer_pass(codegen_ctx_t *ctx, pm_node_t *node) {
         pm_until_node_t *n = (pm_until_node_t *)node;
         infer_pass(ctx, n->predicate);
         if (n->statements) infer_pass(ctx, (pm_node_t *)n->statements);
+        break;
+    }
+    case PM_UNLESS_NODE: {
+        pm_unless_node_t *n = (pm_unless_node_t *)node;
+        infer_pass(ctx, n->predicate);
+        if (n->statements) infer_pass(ctx, (pm_node_t *)n->statements);
+        if (n->else_clause) infer_pass(ctx, (pm_node_t *)n->else_clause);
+        break;
+    }
+    case PM_CASE_NODE: {
+        pm_case_node_t *n = (pm_case_node_t *)node;
+        if (n->predicate) infer_pass(ctx, n->predicate);
+        for (size_t i = 0; i < n->conditions.size; i++) {
+            pm_node_t *cn = n->conditions.nodes[i];
+            if (PM_NODE_TYPE(cn) == PM_WHEN_NODE) {
+                pm_when_node_t *w = (pm_when_node_t *)cn;
+                if (w->statements) infer_pass(ctx, (pm_node_t *)w->statements);
+            }
+        }
+        if (n->else_clause) infer_pass(ctx, (pm_node_t *)n->else_clause);
         break;
     }
     case PM_IF_NODE: {
@@ -2145,10 +2206,20 @@ static char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
                     free(args); free(a);
                     args = na;
                 }
+                /* Fill in default values for optional parameters */
+                for (int i = argc; i < fn->param_count; i++) {
+                    if (fn->params[i].is_optional && fn->params[i].default_node) {
+                        char *def = codegen_expr(ctx, (pm_node_t *)fn->params[i].default_node);
+                        char *na = sfmt("%s%s%s", args, i > 0 ? ", " : "", def);
+                        free(args); free(def);
+                        args = na;
+                    }
+                }
                 /* If target function uses yield and we have a block, pass callback */
                 if (fn->has_yield && call->block &&
                     PM_NODE_TYPE(call->block) == PM_BLOCK_NODE) {
-                    char *na = sfmt("%s%s_block, _block_env", args, argc > 0 ? ", " : "");
+                    int total = fn->param_count;
+                    char *na = sfmt("%s%s_block, _block_env", args, total > 0 ? ", " : "");
                     free(args);
                     args = na;
                 }
@@ -2317,6 +2388,79 @@ static char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
             return r;
         }
         return xstrdup("0");
+    }
+
+    case PM_CASE_NODE: {
+        /* Case as expression — emit if/else chain assigning to a temp */
+        pm_case_node_t *n = (pm_case_node_t *)node;
+        vtype_t rt = infer_type(ctx, node);
+        char *ct = vt_ctype(ctx, rt, false);
+        int tmp = ctx->temp_counter++;
+        char *pred = n->predicate ? codegen_expr(ctx, n->predicate) : NULL;
+        int cid = ctx->temp_counter++;
+
+        if (pred) {
+            char *pct = vt_ctype(ctx, infer_type(ctx, n->predicate), false);
+            emit(ctx, "%s _cpred_%d = %s;\n", pct, cid, pred);
+            free(pct); free(pred);
+        }
+        emit(ctx, "%s _cres_%d = 0;\n", ct, tmp);
+
+        for (size_t i = 0; i < n->conditions.size; i++) {
+            pm_node_t *cn = n->conditions.nodes[i];
+            if (PM_NODE_TYPE(cn) != PM_WHEN_NODE) continue;
+            pm_when_node_t *w = (pm_when_node_t *)cn;
+            emit(ctx, "%sif (", i == 0 ? "" : "} else ");
+            for (size_t j = 0; j < w->conditions.size; j++) {
+                if (j > 0) emit_raw(ctx, " || ");
+                pm_node_t *wc = w->conditions.nodes[j];
+                if (PM_NODE_TYPE(wc) == PM_RANGE_NODE && pred) {
+                    pm_range_node_t *rng = (pm_range_node_t *)wc;
+                    char *lo = codegen_expr(ctx, rng->left);
+                    char *hi = codegen_expr(ctx, rng->right);
+                    emit_raw(ctx, "(_cpred_%d >= %s && _cpred_%d <= %s)", cid, lo, cid, hi);
+                    free(lo); free(hi);
+                } else if (pred) {
+                    char *val = codegen_expr(ctx, wc);
+                    emit_raw(ctx, "_cpred_%d == %s", cid, val);
+                    free(val);
+                } else {
+                    char *val = codegen_expr(ctx, wc);
+                    emit_raw(ctx, "%s", val);
+                    free(val);
+                }
+            }
+            emit_raw(ctx, ") {\n");
+            ctx->indent++;
+            if (w->statements) {
+                pm_statements_node_t *ws = (pm_statements_node_t *)w->statements;
+                for (size_t si = 0; si + 1 < ws->body.size; si++)
+                    codegen_stmt(ctx, ws->body.nodes[si]);
+                if (ws->body.size > 0) {
+                    char *val = codegen_expr(ctx, ws->body.nodes[ws->body.size - 1]);
+                    emit(ctx, "_cres_%d = %s;\n", tmp, val);
+                    free(val);
+                }
+            }
+            ctx->indent--;
+        }
+        if (n->else_clause) {
+            emit(ctx, "} else {\n");
+            ctx->indent++;
+            pm_else_node_t *el = (pm_else_node_t *)n->else_clause;
+            if (el->statements && el->statements->body.size > 0) {
+                pm_statements_node_t *es = el->statements;
+                for (size_t si = 0; si + 1 < es->body.size; si++)
+                    codegen_stmt(ctx, es->body.nodes[si]);
+                char *val = codegen_expr(ctx, es->body.nodes[es->body.size - 1]);
+                emit(ctx, "_cres_%d = %s;\n", tmp, val);
+                free(val);
+            }
+            ctx->indent--;
+        }
+        if (n->conditions.size > 0) emit(ctx, "}\n");
+        free(ct);
+        return sfmt("_cres_%d", tmp);
     }
 
     case PM_LAMBDA_NODE: {
@@ -2510,6 +2654,90 @@ static void codegen_stmt(codegen_ctx_t *ctx, pm_node_t *node) {
     case PM_BREAK_NODE:
         emit(ctx, "break;\n");
         break;
+
+    case PM_NEXT_NODE:
+        emit(ctx, "continue;\n");
+        break;
+
+    case PM_UNLESS_NODE: {
+        pm_unless_node_t *n = (pm_unless_node_t *)node;
+        char *cond = codegen_expr(ctx, n->predicate);
+        emit(ctx, "if (!(%s)) {\n", cond);
+        free(cond);
+        ctx->indent++;
+        if (n->statements) codegen_stmts(ctx, (pm_node_t *)n->statements);
+        ctx->indent--;
+        if (n->else_clause) {
+            emit(ctx, "} else {\n");
+            ctx->indent++;
+            codegen_stmt(ctx, (pm_node_t *)n->else_clause);
+            ctx->indent--;
+        }
+        emit(ctx, "}\n");
+        break;
+    }
+
+    case PM_CASE_NODE: {
+        pm_case_node_t *n = (pm_case_node_t *)node;
+        char *pred = n->predicate ? codegen_expr(ctx, n->predicate) : NULL;
+        int case_id = ctx->temp_counter++;
+
+        if (pred) {
+            vtype_t pt = n->predicate ? infer_type(ctx, n->predicate) : vt_prim(SPINEL_TYPE_VALUE);
+            /* Declare temp for predicate to avoid re-evaluation */
+            char *ct = vt_ctype(ctx, pt, false);
+            emit(ctx, "%s _case_%d = %s;\n", ct, case_id, pred);
+            free(ct); free(pred);
+        }
+
+        for (size_t i = 0; i < n->conditions.size; i++) {
+            pm_node_t *cond_node = n->conditions.nodes[i];
+            if (PM_NODE_TYPE(cond_node) != PM_WHEN_NODE) continue;
+            pm_when_node_t *when = (pm_when_node_t *)cond_node;
+
+            emit(ctx, "%sif (", i == 0 ? "" : "} else ");
+
+            /* Each when can have multiple conditions: when 2, 3 */
+            for (size_t j = 0; j < when->conditions.size; j++) {
+                if (j > 0) emit_raw(ctx, " || ");
+                pm_node_t *wc = when->conditions.nodes[j];
+
+                if (PM_NODE_TYPE(wc) == PM_RANGE_NODE && pred) {
+                    /* when 4..6 → _case >= 4 && _case <= 6 */
+                    pm_range_node_t *rng = (pm_range_node_t *)wc;
+                    char *lo = codegen_expr(ctx, rng->left);
+                    char *hi = codegen_expr(ctx, rng->right);
+                    emit_raw(ctx, "(_case_%d >= %s && _case_%d <= %s)", case_id, lo, case_id, hi);
+                    free(lo); free(hi);
+                } else if (pred) {
+                    /* when value → _case == value */
+                    char *val = codegen_expr(ctx, wc);
+                    emit_raw(ctx, "_case_%d == %s", case_id, val);
+                    free(val);
+                } else {
+                    /* case without predicate: when condition → if condition */
+                    char *val = codegen_expr(ctx, wc);
+                    emit_raw(ctx, "%s", val);
+                    free(val);
+                }
+            }
+            emit_raw(ctx, ") {\n");
+            ctx->indent++;
+            if (when->statements) codegen_stmts(ctx, (pm_node_t *)when->statements);
+            ctx->indent--;
+        }
+
+        if (n->else_clause) {
+            emit(ctx, "} else {\n");
+            ctx->indent++;
+            pm_else_node_t *el = (pm_else_node_t *)n->else_clause;
+            if (el->statements) codegen_stmts(ctx, (pm_node_t *)el->statements);
+            ctx->indent--;
+        }
+        if (n->conditions.size > 0)
+            emit(ctx, "}\n");
+        break;
+    }
 
     case PM_RETURN_NODE: {
         pm_return_node_t *n = (pm_return_node_t *)node;

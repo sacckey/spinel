@@ -44,6 +44,8 @@ typedef struct {
     char name[64];
     vtype_t type;
     bool is_array;
+    bool is_optional;
+    void *default_node;  /* pm_node_t * for optional param default value */
 } param_info_t;
 
 /* Method info */
