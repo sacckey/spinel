@@ -999,6 +999,10 @@ static vtype_t infer_type(codegen_ctx_t *ctx, pm_node_t *node) {
                 if (strcmp(method, "map") == 0 || strcmp(method, "select") == 0 ||
                     strcmp(method, "reject") == 0) { free(method); return vt_prim(SPINEL_TYPE_ARRAY); }
                 if (strcmp(method, "first") == 0 || strcmp(method, "last") == 0) { free(method); return vt_prim(SPINEL_TYPE_INTEGER); }
+                if (strcmp(method, "reduce") == 0 || strcmp(method, "inject") == 0 ||
+                    strcmp(method, "min") == 0 || strcmp(method, "max") == 0 ||
+                    strcmp(method, "sum") == 0) { free(method); return vt_prim(SPINEL_TYPE_INTEGER); }
+                if (strcmp(method, "sort") == 0) { free(method); return vt_prim(SPINEL_TYPE_ARRAY); }
                 if (strcmp(method, "include?") == 0) { free(method); return vt_prim(SPINEL_TYPE_BOOLEAN); }
                 if (strcmp(method, "each") == 0) { free(method); return vt_prim(SPINEL_TYPE_ARRAY); }
             }
@@ -2924,6 +2928,35 @@ static char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
                     r = sfmt("sp_IntArray_length(%s)", recv);
                 else if (strcmp(method, "reverse!") == 0)
                     r = sfmt("sp_IntArray_reverse_bang(%s)", recv);
+                else if (strcmp(method, "sort") == 0)
+                    r = sfmt("sp_IntArray_sort(%s)", recv);
+                else if (strcmp(method, "sort!") == 0)
+                    r = sfmt("sp_IntArray_sort_bang(%s)", recv);
+                else if (strcmp(method, "min") == 0) {
+                    int tmp = ctx->temp_counter++;
+                    emit(ctx, "mrb_int _min_%d = sp_IntArray_get(%s, 0);\n", tmp, recv);
+                    emit(ctx, "for (mrb_int _mi_%d = 1; _mi_%d < sp_IntArray_length(%s); _mi_%d++) {\n", tmp, tmp, recv, tmp);
+                    emit(ctx, "  mrb_int _v_%d = sp_IntArray_get(%s, _mi_%d);\n", tmp, recv, tmp);
+                    emit(ctx, "  if (_v_%d < _min_%d) _min_%d = _v_%d;\n", tmp, tmp, tmp, tmp);
+                    emit(ctx, "}\n");
+                    r = sfmt("_min_%d", tmp);
+                }
+                else if (strcmp(method, "max") == 0) {
+                    int tmp = ctx->temp_counter++;
+                    emit(ctx, "mrb_int _max_%d = sp_IntArray_get(%s, 0);\n", tmp, recv);
+                    emit(ctx, "for (mrb_int _mi_%d = 1; _mi_%d < sp_IntArray_length(%s); _mi_%d++) {\n", tmp, tmp, recv, tmp);
+                    emit(ctx, "  mrb_int _v_%d = sp_IntArray_get(%s, _mi_%d);\n", tmp, recv, tmp);
+                    emit(ctx, "  if (_v_%d > _max_%d) _max_%d = _v_%d;\n", tmp, tmp, tmp, tmp);
+                    emit(ctx, "}\n");
+                    r = sfmt("_max_%d", tmp);
+                }
+                else if (strcmp(method, "sum") == 0) {
+                    int tmp = ctx->temp_counter++;
+                    emit(ctx, "mrb_int _sum_%d = 0;\n", tmp);
+                    emit(ctx, "for (mrb_int _si_%d = 0; _si_%d < sp_IntArray_length(%s); _si_%d++)\n", tmp, tmp, recv, tmp);
+                    emit(ctx, "  _sum_%d += sp_IntArray_get(%s, _si_%d);\n", tmp, recv, tmp);
+                    r = sfmt("_sum_%d", tmp);
+                }
                 else if (strcmp(method, "first") == 0)
                     r = sfmt("sp_IntArray_get(%s, 0)", recv);
                 else if (strcmp(method, "last") == 0)
@@ -3114,6 +3147,59 @@ static char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
                     emit(ctx, "}\n");
                     free(recv); free(bpname); free(method);
                     return sfmt("_rej_%d", tmp);
+                }
+
+                /* Array#reduce/inject with initial value and block */
+                if ((strcmp(method, "reduce") == 0 || strcmp(method, "inject") == 0) &&
+                    call->arguments && call->arguments->arguments.size == 1 &&
+                    call->block && PM_NODE_TYPE(call->block) == PM_BLOCK_NODE) {
+                    pm_block_node_t *blk = (pm_block_node_t *)call->block;
+                    char *init_val = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+                    /* Get block params: |acc, x| */
+                    char *acc_name = NULL, *elem_name = NULL;
+                    if (blk->parameters && PM_NODE_TYPE(blk->parameters) == PM_BLOCK_PARAMETERS_NODE) {
+                        pm_block_parameters_node_t *bp = (pm_block_parameters_node_t *)blk->parameters;
+                        if (bp->parameters && bp->parameters->requireds.size >= 2) {
+                            pm_node_t *p0 = bp->parameters->requireds.nodes[0];
+                            pm_node_t *p1 = bp->parameters->requireds.nodes[1];
+                            if (PM_NODE_TYPE(p0) == PM_REQUIRED_PARAMETER_NODE)
+                                acc_name = cstr(ctx, ((pm_required_parameter_node_t *)p0)->name);
+                            if (PM_NODE_TYPE(p1) == PM_REQUIRED_PARAMETER_NODE)
+                                elem_name = cstr(ctx, ((pm_required_parameter_node_t *)p1)->name);
+                        }
+                    }
+                    int tmp = ctx->temp_counter++;
+                    if (acc_name && elem_name) {
+                        char *acc_cn = make_cname(acc_name, false);
+                        char *elem_cn = make_cname(elem_name, false);
+                        /* Register block params for type inference */
+                        int sv = ctx->var_count;
+                        var_declare(ctx, acc_name, vt_prim(SPINEL_TYPE_INTEGER), false);
+                        var_declare(ctx, elem_name, vt_prim(SPINEL_TYPE_INTEGER), false);
+                        emit(ctx, "mrb_int _red_%d; { mrb_int %s = %s;\n", tmp, acc_cn, init_val);
+                        emit(ctx, "  for (mrb_int _ri_%d = 0; _ri_%d < sp_IntArray_length(%s); _ri_%d++) {\n",
+                             tmp, tmp, recv, tmp);
+                        emit(ctx, "    mrb_int %s = sp_IntArray_get(%s, _ri_%d);\n", elem_cn, recv, tmp);
+                        /* Block body expression */
+                        if (blk->body) {
+                            pm_node_t *body = (pm_node_t *)blk->body;
+                            char *body_expr;
+                            if (PM_NODE_TYPE(body) == PM_STATEMENTS_NODE) {
+                                pm_statements_node_t *stmts = (pm_statements_node_t *)body;
+                                body_expr = stmts->body.size > 0 ? codegen_expr(ctx, stmts->body.nodes[stmts->body.size - 1]) : xstrdup("0");
+                            } else {
+                                body_expr = codegen_expr(ctx, body);
+                            }
+                            emit(ctx, "    %s = %s;\n", acc_cn, body_expr);
+                            free(body_expr);
+                        }
+                        emit(ctx, "  } _red_%d = %s; }\n", tmp, acc_cn);
+                        ctx->var_count = sv; /* restore var table */
+                        free(acc_cn); free(elem_cn);
+                    }
+                    free(acc_name); free(elem_name); free(init_val);
+                    free(recv); free(method);
+                    return sfmt("_red_%d", tmp);
                 }
 
                 free(recv);
@@ -5997,6 +6083,16 @@ static void emit_header(codegen_ctx_t *ctx) {
     emit_raw(ctx, "    for (mrb_int i = 0, j = a->len - 1; i < j; i++, j--) {\n");
     emit_raw(ctx, "        mrb_int t = a->data[a->start+i]; a->data[a->start+i] = a->data[a->start+j]; a->data[a->start+j] = t;\n");
     emit_raw(ctx, "    }\n}\n\n");
+
+    emit_raw(ctx, "static int _sp_int_cmp(const void *a, const void *b) {\n");
+    emit_raw(ctx, "    mrb_int va = *(const mrb_int *)a, vb = *(const mrb_int *)b;\n");
+    emit_raw(ctx, "    return (va > vb) - (va < vb);\n}\n");
+    emit_raw(ctx, "static sp_IntArray *sp_IntArray_sort(sp_IntArray *a) {\n");
+    emit_raw(ctx, "    sp_IntArray *b = sp_IntArray_dup(a);\n");
+    emit_raw(ctx, "    qsort(b->data + b->start, b->len, sizeof(mrb_int), _sp_int_cmp);\n");
+    emit_raw(ctx, "    return b;\n}\n");
+    emit_raw(ctx, "static void sp_IntArray_sort_bang(sp_IntArray *a) {\n");
+    emit_raw(ctx, "    qsort(a->data + a->start, a->len, sizeof(mrb_int), _sp_int_cmp);\n}\n\n");
 
     emit_raw(ctx, "static mrb_int sp_IntArray_length(sp_IntArray *a) {\n");
     emit_raw(ctx, "    return a->len;\n}\n\n");
