@@ -947,7 +947,7 @@ static vtype_t infer_type(codegen_ctx_t *ctx, pm_node_t *node) {
                 if (strcmp(method, "length") == 0 || strcmp(method, "size") == 0) { free(method); return vt_prim(SPINEL_TYPE_INTEGER); }
                 if (strcmp(method, "upcase") == 0 || strcmp(method, "downcase") == 0) { free(method); return vt_prim(SPINEL_TYPE_STRING); }
                 if (strcmp(method, "include?") == 0) { free(method); return vt_prim(SPINEL_TYPE_BOOLEAN); }
-                if (strcmp(method, "+") == 0) { free(method); return vt_prim(SPINEL_TYPE_STRING); }
+                if (strcmp(method, "+") == 0 || strcmp(method, "<<") == 0) { free(method); return vt_prim(SPINEL_TYPE_STRING); }
                 if (strcmp(method, "strip") == 0 || strcmp(method, "chomp") == 0 ||
                     strcmp(method, "capitalize") == 0 || strcmp(method, "reverse") == 0) { free(method); return vt_prim(SPINEL_TYPE_STRING); }
                 if (strcmp(method, "gsub") == 0 || strcmp(method, "sub") == 0) { free(method); return vt_prim(SPINEL_TYPE_STRING); }
@@ -4458,6 +4458,65 @@ static void codegen_stmt(codegen_ctx_t *ctx, pm_node_t *node) {
             emit(ctx, "}\n");
             free(method);
             break;
+        }
+
+        /* Integer#upto/downto with block → for loop */
+        if (call->block && PM_NODE_TYPE(call->block) == PM_BLOCK_NODE &&
+            (strcmp(method, "upto") == 0 || strcmp(method, "downto") == 0) &&
+            call->arguments && call->arguments->arguments.size == 1) {
+            pm_block_node_t *blk = (pm_block_node_t *)call->block;
+            char *start = codegen_expr(ctx, call->receiver);
+            char *end = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+            bool is_upto = strcmp(method, "upto") == 0;
+
+            char *bpname = NULL;
+            if (blk->parameters && PM_NODE_TYPE(blk->parameters) == PM_BLOCK_PARAMETERS_NODE) {
+                pm_block_parameters_node_t *bp = (pm_block_parameters_node_t *)blk->parameters;
+                if (bp->parameters && bp->parameters->requireds.size > 0) {
+                    pm_node_t *p = bp->parameters->requireds.nodes[0];
+                    if (PM_NODE_TYPE(p) == PM_REQUIRED_PARAMETER_NODE)
+                        bpname = cstr(ctx, ((pm_required_parameter_node_t *)p)->name);
+                }
+            }
+            if (bpname) {
+                char *cn = make_cname(bpname, false);
+                if (is_upto)
+                    emit(ctx, "for (%s = %s; %s <= %s; %s++) {\n", cn, start, cn, end, cn);
+                else
+                    emit(ctx, "for (%s = %s; %s >= %s; %s--) {\n", cn, start, cn, end, cn);
+                free(cn); free(bpname);
+            } else {
+                int tmp = ctx->temp_counter++;
+                if (is_upto)
+                    emit(ctx, "for (mrb_int _it%d = %s; _it%d <= %s; _it%d++) {\n", tmp, start, tmp, end, tmp);
+                else
+                    emit(ctx, "for (mrb_int _it%d = %s; _it%d >= %s; _it%d--) {\n", tmp, start, tmp, end, tmp);
+            }
+            free(start); free(end);
+            ctx->indent++;
+            ctx->for_depth++;
+            if (blk->body) codegen_stmts(ctx, (pm_node_t *)blk->body);
+            ctx->for_depth--;
+            ctx->indent--;
+            emit(ctx, "}\n");
+            free(method);
+            break;
+        }
+
+        /* String << (append) as statement → reassign */
+        if (call->receiver && strcmp(method, "<<") == 0 &&
+            call->arguments && call->arguments->arguments.size == 1) {
+            vtype_t recv_t = infer_type(ctx, call->receiver);
+            if (recv_t.kind == SPINEL_TYPE_STRING &&
+                PM_NODE_TYPE(call->receiver) == PM_LOCAL_VARIABLE_READ_NODE) {
+                pm_local_variable_read_node_t *lv = (pm_local_variable_read_node_t *)call->receiver;
+                char *vn = cstr(ctx, lv->name);
+                char *cn = make_cname(vn, false);
+                char *arg = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+                emit(ctx, "%s = sp_str_concat(%s, %s);\n", cn, cn, arg);
+                free(vn); free(cn); free(arg); free(method);
+                break;
+            }
         }
 
         /* General call as statement */
