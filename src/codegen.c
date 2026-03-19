@@ -4788,7 +4788,7 @@ static char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
                                     class_info_t *cls = find_class(ctx, classes[ci]);
                                     if (!cls) continue;
                                     const char *cond = ci == 0 ? "if" : "else if";
-                                    emit(ctx, "%s (%s.tag == SP_TAG_%s) _poly_%d = sp_%s_%s((sp_%s *)%s.p%s);\n",
+                                    emit(ctx, "%s (SP_TAG(%s) == SP_TAG_%s) _poly_%d = sp_%s_%s((sp_%s *)sp_unbox_obj(%s)%s);\n",
                                          cond, recv, classes[ci], tmp,
                                          classes[ci], c_mname, classes[ci], recv, args);
                                 }
@@ -4801,8 +4801,8 @@ static char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
                                     if (!cls) continue;
                                     method_info_t *mi = find_method_inherited(ctx, cls, method, NULL);
                                     const char *cond = ci == 0 ? "if" : "else if";
-                                    emit(ctx, "%s (%s.tag == SP_TAG_%s) {\n", cond, recv, classes[ci]);
-                                    char *call_expr = sfmt("sp_%s_%s((sp_%s *)%s.p%s)",
+                                    emit(ctx, "%s (SP_TAG(%s) == SP_TAG_%s) {\n", cond, recv, classes[ci]);
+                                    char *call_expr = sfmt("sp_%s_%s((sp_%s *)sp_unbox_obj(%s)%s)",
                                                            classes[ci], c_mname, classes[ci], recv, args);
                                     if (mi) {
                                         char *boxed = poly_box_expr_vt(ctx, mi->return_type, call_expr);
@@ -5835,11 +5835,11 @@ static void codegen_pattern_cond(codegen_ctx_t *ctx, pm_node_t *pattern, int cas
         /* in Integer / in String / in Float */
         pm_constant_read_node_t *cr = (pm_constant_read_node_t *)pattern;
         if (ceq(ctx, cr->name, "Integer"))
-            emit_raw(ctx, "_cmpred_%d.tag == SP_T_INT", case_id);
+            emit_raw(ctx, "SP_IS_INT(_cmpred_%d)", case_id);
         else if (ceq(ctx, cr->name, "String"))
-            emit_raw(ctx, "_cmpred_%d.tag == SP_T_STRING", case_id);
+            emit_raw(ctx, "SP_IS_STR(_cmpred_%d)", case_id);
         else if (ceq(ctx, cr->name, "Float"))
-            emit_raw(ctx, "_cmpred_%d.tag == SP_T_FLOAT", case_id);
+            emit_raw(ctx, "SP_IS_DBL(_cmpred_%d)", case_id);
         else
             emit_raw(ctx, "0 /* unsupported pattern */");
         break;
@@ -5849,30 +5849,30 @@ static void codegen_pattern_cond(codegen_ctx_t *ctx, pm_node_t *pattern, int cas
         pm_integer_node_t *n = (pm_integer_node_t *)pattern;
         int64_t val = (int64_t)n->value.value;
         if (n->value.negative) val = -val;
-        emit_raw(ctx, "_cmpred_%d.tag == SP_T_INT && _cmpred_%d.i == %lldLL", case_id, case_id, (long long)val);
+        emit_raw(ctx, "SP_IS_INT(_cmpred_%d) && sp_unbox_int(_cmpred_%d) == %lldLL", case_id, case_id, (long long)val);
         break;
     }
     case PM_FLOAT_NODE: {
         pm_float_node_t *n = (pm_float_node_t *)pattern;
-        emit_raw(ctx, "_cmpred_%d.tag == SP_T_FLOAT && _cmpred_%d.f == %.17g", case_id, case_id, n->value);
+        emit_raw(ctx, "SP_IS_DBL(_cmpred_%d) && sp_unbox_float(_cmpred_%d) == %.17g", case_id, case_id, n->value);
         break;
     }
     case PM_STRING_NODE: {
         pm_string_node_t *sn = (pm_string_node_t *)pattern;
         const uint8_t *src = pm_string_source(&sn->unescaped);
         size_t len = pm_string_length(&sn->unescaped);
-        emit_raw(ctx, "_cmpred_%d.tag == SP_T_STRING && strcmp(_cmpred_%d.s, \"%.*s\") == 0",
+        emit_raw(ctx, "SP_IS_STR(_cmpred_%d) && strcmp(sp_unbox_str(_cmpred_%d), \"%.*s\") == 0",
                  case_id, case_id, (int)len, src);
         break;
     }
     case PM_NIL_NODE:
-        emit_raw(ctx, "_cmpred_%d.tag == SP_T_NIL", case_id);
+        emit_raw(ctx, "SP_IS_NIL(_cmpred_%d)", case_id);
         break;
     case PM_TRUE_NODE:
-        emit_raw(ctx, "_cmpred_%d.tag == SP_T_BOOL && _cmpred_%d.i", case_id, case_id);
+        emit_raw(ctx, "SP_IS_BOOL(_cmpred_%d) && sp_unbox_bool(_cmpred_%d)", case_id, case_id);
         break;
     case PM_FALSE_NODE:
-        emit_raw(ctx, "_cmpred_%d.tag == SP_T_BOOL && !_cmpred_%d.i", case_id, case_id);
+        emit_raw(ctx, "SP_IS_BOOL(_cmpred_%d) && !sp_unbox_bool(_cmpred_%d)", case_id, case_id);
         break;
     case PM_ALTERNATION_PATTERN_NODE: {
         /* in true | false → OR of sub-patterns */
@@ -8028,34 +8028,55 @@ static void emit_header(codegen_ctx_t *ctx) {
     emit_raw(ctx, "#ifndef TRUE\n#define TRUE true\n#endif\n");
     emit_raw(ctx, "#ifndef FALSE\n#define FALSE false\n#endif\n\n");
 
-    /* ---- Polymorphic tagged union (sp_RbValue) ---- */
+    /* ---- Polymorphic NaN-boxed value (sp_RbValue = uint64_t) ---- */
     if (ctx->needs_poly) {
-        /* Emit sp_tag enum with per-class tags */
-        emit_raw(ctx, "enum sp_tag { SP_T_INT, SP_T_FLOAT, SP_T_BOOL, SP_T_NIL, SP_T_STRING, SP_T_OBJECT");
-        /* Add per-class tag values starting at SP_T_CLASS_BASE = 64 */
+        emit_raw(ctx, "/* NaN-boxing: 8-byte tagged value */\n");
+        emit_raw(ctx, "typedef uint64_t sp_RbValue;\n");
+        /* Tag constants */
+        emit_raw(ctx, "#define SP_T_OBJECT 0x0000\n");
+        emit_raw(ctx, "#define SP_T_INT    0x0001\n");
+        emit_raw(ctx, "#define SP_T_STRING 0x0002\n");
+        emit_raw(ctx, "#define SP_T_BOOL   0x0003\n");
+        emit_raw(ctx, "#define SP_T_NIL    0x0004\n");
+        emit_raw(ctx, "#define SP_T_FLOAT  0x0005\n");
+        /* Per-class tag values starting at 0x0040 */
         for (int i = 0; i < ctx->class_count; i++) {
-            emit_raw(ctx, ", SP_TAG_%s = %d", ctx->classes[i].name, 64 + i);
+            emit_raw(ctx, "#define SP_TAG_%s 0x%04x\n", ctx->classes[i].name, 0x0040 + i);
         }
-        emit_raw(ctx, " };\n");
-        emit_raw(ctx, "typedef struct { enum sp_tag tag; union { int64_t i; double f; const char *s; void *p; }; } sp_RbValue;\n");
-        emit_raw(ctx, "static sp_RbValue sp_box_int(int64_t n) { return (sp_RbValue){SP_T_INT, .i = n}; }\n");
-        emit_raw(ctx, "static sp_RbValue sp_box_float(double f) { return (sp_RbValue){SP_T_FLOAT, .f = f}; }\n");
-        emit_raw(ctx, "static sp_RbValue sp_box_str(const char *s) { return (sp_RbValue){SP_T_STRING, .s = s}; }\n");
-        emit_raw(ctx, "static sp_RbValue sp_box_bool(int b) { return (sp_RbValue){SP_T_BOOL, .i = b}; }\n");
-        emit_raw(ctx, "static sp_RbValue sp_box_nil(void) { return (sp_RbValue){SP_T_NIL, .i = 0}; }\n");
-        emit_raw(ctx, "static sp_RbValue sp_box_obj(int tag, void *p) { sp_RbValue v; v.tag = (enum sp_tag)tag; v.p = p; return v; }\n");
+        emit_raw(ctx, "#define SP_TAG(v)       ((uint16_t)((v) >> 48))\n");
+        emit_raw(ctx, "#define SP_PAYLOAD(v)   ((v) & 0x0000FFFFFFFFFFFFULL)\n");
+        emit_raw(ctx, "#define SP_IS_INT(v)    (SP_TAG(v) == SP_T_INT)\n");
+        emit_raw(ctx, "#define SP_IS_STR(v)    (SP_TAG(v) == SP_T_STRING)\n");
+        emit_raw(ctx, "#define SP_IS_BOOL(v)   (SP_TAG(v) == SP_T_BOOL)\n");
+        emit_raw(ctx, "#define SP_IS_NIL(v)    (SP_TAG(v) == SP_T_NIL)\n");
+        emit_raw(ctx, "#define SP_IS_DBL(v)    (SP_TAG(v) == SP_T_FLOAT)\n");
+        emit_raw(ctx, "#define SP_IS_OBJ(v)    (SP_TAG(v) >= 0x0040)\n\n");
+        /* Boxing */
+        emit_raw(ctx, "static sp_RbValue sp_box_int(int64_t n) { return ((uint64_t)0x0001 << 48) | ((uint64_t)n & 0x0000FFFFFFFFFFFFULL); }\n");
+        emit_raw(ctx, "static sp_RbValue sp_box_float(double f) { uint64_t b; memcpy(&b, &f, 8); return ((uint64_t)0x0005 << 48) | (b >> 16); }\n");
+        emit_raw(ctx, "static sp_RbValue sp_box_str(const char *s) { return ((uint64_t)0x0002 << 48) | (uint64_t)(uintptr_t)s; }\n");
+        emit_raw(ctx, "static sp_RbValue sp_box_bool(int b) { return ((uint64_t)0x0003 << 48) | (b ? 1 : 0); }\n");
+        emit_raw(ctx, "static sp_RbValue sp_box_nil(void) { return ((uint64_t)0x0004 << 48); }\n");
+        emit_raw(ctx, "static sp_RbValue sp_box_obj(int tag, void *p) { return ((uint64_t)(unsigned)tag << 48) | (uint64_t)(uintptr_t)p; }\n\n");
+        /* Unboxing */
+        emit_raw(ctx, "static int64_t sp_unbox_int(sp_RbValue v) { int64_t raw = (int64_t)(v & 0x0000FFFFFFFFFFFFULL); return (raw << 16) >> 16; }\n");
+        emit_raw(ctx, "static double sp_unbox_float(sp_RbValue v) { uint64_t b = (v & 0x0000FFFFFFFFFFFFULL) << 16; double f; memcpy(&f, &b, 8); return f; }\n");
+        emit_raw(ctx, "static const char *sp_unbox_str(sp_RbValue v) { return (const char *)(uintptr_t)(v & 0x0000FFFFFFFFFFFFULL); }\n");
+        emit_raw(ctx, "static void *sp_unbox_obj(sp_RbValue v) { return (void *)(uintptr_t)(v & 0x0000FFFFFFFFFFFFULL); }\n");
+        emit_raw(ctx, "static int64_t sp_unbox_bool(sp_RbValue v) { return (int64_t)(v & 1); }\n\n");
+        /* sp_poly_puts */
         emit_raw(ctx, "static void sp_poly_puts(sp_RbValue v) {\n");
-        emit_raw(ctx, "    switch (v.tag) {\n");
-        emit_raw(ctx, "        case SP_T_INT: printf(\"%%lld\\n\", (long long)v.i); break;\n");
-        emit_raw(ctx, "        case SP_T_FLOAT: { char buf[32]; snprintf(buf,32,\"%%g\",v.f);\n");
-        emit_raw(ctx, "                           printf(\"%%s%%s\\n\", buf, strchr(buf,'.')||strchr(buf,'e')?\"\":\".0\"); break; }\n");
-        emit_raw(ctx, "        case SP_T_STRING: { const char *s=v.s; fputs(s,stdout);\n");
-        emit_raw(ctx, "                           if(!*s||s[strlen(s)-1]!='\\n') putchar('\\n'); break; }\n");
-        emit_raw(ctx, "        case SP_T_BOOL: puts(v.i ? \"true\" : \"false\"); break;\n");
-        emit_raw(ctx, "        case SP_T_NIL: puts(\"\"); break;\n");
-        emit_raw(ctx, "        default: puts(\"(object)\"); break;\n");
-        emit_raw(ctx, "    }\n}\n");
-        emit_raw(ctx, "static mrb_bool sp_poly_nil_p(sp_RbValue v) { return v.tag == SP_T_NIL; }\n\n");
+        emit_raw(ctx, "    uint16_t t = SP_TAG(v);\n");
+        emit_raw(ctx, "    if (t == SP_T_INT) { printf(\"%%lld\\n\", (long long)sp_unbox_int(v)); }\n");
+        emit_raw(ctx, "    else if (t == SP_T_FLOAT) { char buf[32]; snprintf(buf,32,\"%%g\",sp_unbox_float(v));\n");
+        emit_raw(ctx, "        printf(\"%%s%%s\\n\", buf, strchr(buf,'.')||strchr(buf,'e')?\"\":\".0\"); }\n");
+        emit_raw(ctx, "    else if (t == SP_T_STRING) { const char *s=sp_unbox_str(v); fputs(s,stdout);\n");
+        emit_raw(ctx, "        if(!*s||s[strlen(s)-1]!='\\n') putchar('\\n'); }\n");
+        emit_raw(ctx, "    else if (t == SP_T_BOOL) { puts(sp_unbox_bool(v) ? \"true\" : \"false\"); }\n");
+        emit_raw(ctx, "    else if (t == SP_T_NIL) { puts(\"\"); }\n");
+        emit_raw(ctx, "    else { puts(\"(object)\"); }\n");
+        emit_raw(ctx, "}\n");
+        emit_raw(ctx, "static mrb_bool sp_poly_nil_p(sp_RbValue v) { return SP_TAG(v) == SP_T_NIL; }\n\n");
     }
 
     /* ---- Heterogeneous array (sp_RbArray) ---- */
@@ -8281,112 +8302,118 @@ static void emit_header(codegen_ctx_t *ctx) {
     /* ---- Polymorphic to_s (after sp_int_to_s/sp_float_to_s) ---- */
     if (ctx->needs_poly) {
         emit_raw(ctx, "static const char *sp_poly_to_s(sp_RbValue v) {\n");
-        emit_raw(ctx, "    switch (v.tag) {\n");
-        emit_raw(ctx, "        case SP_T_INT: return sp_int_to_s(v.i);\n");
-        emit_raw(ctx, "        case SP_T_FLOAT: return sp_float_to_s(v.f);\n");
-        emit_raw(ctx, "        case SP_T_STRING: return v.s;\n");
-        emit_raw(ctx, "        case SP_T_BOOL: return v.i ? \"true\" : \"false\";\n");
-        emit_raw(ctx, "        case SP_T_NIL: return \"\";\n");
-        emit_raw(ctx, "        default: return \"(object)\";\n");
-        emit_raw(ctx, "    }\n}\n\n");
+        emit_raw(ctx, "    uint16_t t = SP_TAG(v);\n");
+        emit_raw(ctx, "    if (t == SP_T_INT) return sp_int_to_s(sp_unbox_int(v));\n");
+        emit_raw(ctx, "    if (t == SP_T_FLOAT) return sp_float_to_s(sp_unbox_float(v));\n");
+        emit_raw(ctx, "    if (t == SP_T_STRING) return sp_unbox_str(v);\n");
+        emit_raw(ctx, "    if (t == SP_T_BOOL) return sp_unbox_bool(v) ? \"true\" : \"false\";\n");
+        emit_raw(ctx, "    if (t == SP_T_NIL) return \"\";\n");
+        emit_raw(ctx, "    return \"(object)\";\n");
+        emit_raw(ctx, "}\n\n");
 
         /* ---- Polymorphic arithmetic/comparison helpers ---- */
         emit_raw(ctx, "static void sp_raise(const char *msg) { fprintf(stderr, \"%%s\\n\", msg); exit(1); }\n\n");
 
+        /* Helper macros for arithmetic/comparison dispatch */
+        emit_raw(ctx, "#define SP_TAG_A SP_TAG(a)\n");
+        emit_raw(ctx, "#define SP_TAG_B SP_TAG(b)\n");
+        emit_raw(ctx, "#define SP_AI sp_unbox_int(a)\n");
+        emit_raw(ctx, "#define SP_BI sp_unbox_int(b)\n");
+        emit_raw(ctx, "#define SP_AF sp_unbox_float(a)\n");
+        emit_raw(ctx, "#define SP_BF sp_unbox_float(b)\n\n");
+
         emit_raw(ctx, "static sp_RbValue sp_poly_add(sp_RbValue a, sp_RbValue b) {\n");
-        emit_raw(ctx, "    if (a.tag == SP_T_INT && b.tag == SP_T_INT) return sp_box_int(a.i + b.i);\n");
-        emit_raw(ctx, "    if (a.tag == SP_T_FLOAT || b.tag == SP_T_FLOAT) {\n");
-        emit_raw(ctx, "        double fa = a.tag == SP_T_FLOAT ? a.f : (double)a.i;\n");
-        emit_raw(ctx, "        double fb = b.tag == SP_T_FLOAT ? b.f : (double)b.i;\n");
+        emit_raw(ctx, "    if (SP_TAG_A == SP_T_INT && SP_TAG_B == SP_T_INT) return sp_box_int(SP_AI + SP_BI);\n");
+        emit_raw(ctx, "    if (SP_TAG_A == SP_T_FLOAT || SP_TAG_B == SP_T_FLOAT) {\n");
+        emit_raw(ctx, "        double fa = SP_TAG_A == SP_T_FLOAT ? SP_AF : (double)SP_AI;\n");
+        emit_raw(ctx, "        double fb = SP_TAG_B == SP_T_FLOAT ? SP_BF : (double)SP_BI;\n");
         emit_raw(ctx, "        return sp_box_float(fa + fb);\n");
         emit_raw(ctx, "    }\n");
-        emit_raw(ctx, "    if (a.tag == SP_T_STRING && b.tag == SP_T_STRING)\n");
-        emit_raw(ctx, "        return sp_box_str(sp_str_concat(a.s, b.s));\n");
+        emit_raw(ctx, "    if (SP_TAG_A == SP_T_STRING && SP_TAG_B == SP_T_STRING)\n");
+        emit_raw(ctx, "        return sp_box_str(sp_str_concat(sp_unbox_str(a), sp_unbox_str(b)));\n");
         emit_raw(ctx, "    sp_raise(\"TypeError: + not defined\"); return sp_box_nil();\n");
         emit_raw(ctx, "}\n\n");
 
         emit_raw(ctx, "static sp_RbValue sp_poly_sub(sp_RbValue a, sp_RbValue b) {\n");
-        emit_raw(ctx, "    if (a.tag == SP_T_INT && b.tag == SP_T_INT) return sp_box_int(a.i - b.i);\n");
-        emit_raw(ctx, "    if (a.tag == SP_T_FLOAT || b.tag == SP_T_FLOAT) {\n");
-        emit_raw(ctx, "        double fa = a.tag == SP_T_FLOAT ? a.f : (double)a.i;\n");
-        emit_raw(ctx, "        double fb = b.tag == SP_T_FLOAT ? b.f : (double)b.i;\n");
+        emit_raw(ctx, "    if (SP_TAG_A == SP_T_INT && SP_TAG_B == SP_T_INT) return sp_box_int(SP_AI - SP_BI);\n");
+        emit_raw(ctx, "    if (SP_TAG_A == SP_T_FLOAT || SP_TAG_B == SP_T_FLOAT) {\n");
+        emit_raw(ctx, "        double fa = SP_TAG_A == SP_T_FLOAT ? SP_AF : (double)SP_AI;\n");
+        emit_raw(ctx, "        double fb = SP_TAG_B == SP_T_FLOAT ? SP_BF : (double)SP_BI;\n");
         emit_raw(ctx, "        return sp_box_float(fa - fb);\n");
         emit_raw(ctx, "    }\n");
         emit_raw(ctx, "    sp_raise(\"TypeError: - not defined\"); return sp_box_nil();\n");
         emit_raw(ctx, "}\n\n");
 
         emit_raw(ctx, "static sp_RbValue sp_poly_mul(sp_RbValue a, sp_RbValue b) {\n");
-        emit_raw(ctx, "    if (a.tag == SP_T_INT && b.tag == SP_T_INT) return sp_box_int(a.i * b.i);\n");
-        emit_raw(ctx, "    if (a.tag == SP_T_FLOAT || b.tag == SP_T_FLOAT) {\n");
-        emit_raw(ctx, "        double fa = a.tag == SP_T_FLOAT ? a.f : (double)a.i;\n");
-        emit_raw(ctx, "        double fb = b.tag == SP_T_FLOAT ? b.f : (double)b.i;\n");
+        emit_raw(ctx, "    if (SP_TAG_A == SP_T_INT && SP_TAG_B == SP_T_INT) return sp_box_int(SP_AI * SP_BI);\n");
+        emit_raw(ctx, "    if (SP_TAG_A == SP_T_FLOAT || SP_TAG_B == SP_T_FLOAT) {\n");
+        emit_raw(ctx, "        double fa = SP_TAG_A == SP_T_FLOAT ? SP_AF : (double)SP_AI;\n");
+        emit_raw(ctx, "        double fb = SP_TAG_B == SP_T_FLOAT ? SP_BF : (double)SP_BI;\n");
         emit_raw(ctx, "        return sp_box_float(fa * fb);\n");
         emit_raw(ctx, "    }\n");
-        emit_raw(ctx, "    if (a.tag == SP_T_STRING && b.tag == SP_T_INT)\n");
-        emit_raw(ctx, "        return sp_box_str(sp_str_repeat(a.s, b.i));\n");
+        emit_raw(ctx, "    if (SP_TAG_A == SP_T_STRING && SP_TAG_B == SP_T_INT)\n");
+        emit_raw(ctx, "        return sp_box_str(sp_str_repeat(sp_unbox_str(a), SP_BI));\n");
         emit_raw(ctx, "    sp_raise(\"TypeError: * not defined\"); return sp_box_nil();\n");
         emit_raw(ctx, "}\n\n");
 
         emit_raw(ctx, "static sp_RbValue sp_poly_div(sp_RbValue a, sp_RbValue b) {\n");
-        emit_raw(ctx, "    if (a.tag == SP_T_INT && b.tag == SP_T_INT) return sp_box_int(a.i / b.i);\n");
-        emit_raw(ctx, "    if (a.tag == SP_T_FLOAT || b.tag == SP_T_FLOAT) {\n");
-        emit_raw(ctx, "        double fa = a.tag == SP_T_FLOAT ? a.f : (double)a.i;\n");
-        emit_raw(ctx, "        double fb = b.tag == SP_T_FLOAT ? b.f : (double)b.i;\n");
+        emit_raw(ctx, "    if (SP_TAG_A == SP_T_INT && SP_TAG_B == SP_T_INT) return sp_box_int(SP_AI / SP_BI);\n");
+        emit_raw(ctx, "    if (SP_TAG_A == SP_T_FLOAT || SP_TAG_B == SP_T_FLOAT) {\n");
+        emit_raw(ctx, "        double fa = SP_TAG_A == SP_T_FLOAT ? SP_AF : (double)SP_AI;\n");
+        emit_raw(ctx, "        double fb = SP_TAG_B == SP_T_FLOAT ? SP_BF : (double)SP_BI;\n");
         emit_raw(ctx, "        return sp_box_float(fa / fb);\n");
         emit_raw(ctx, "    }\n");
         emit_raw(ctx, "    sp_raise(\"TypeError: / not defined\"); return sp_box_nil();\n");
         emit_raw(ctx, "}\n\n");
 
         emit_raw(ctx, "static mrb_bool sp_poly_gt(sp_RbValue a, sp_RbValue b) {\n");
-        emit_raw(ctx, "    if (a.tag == SP_T_INT && b.tag == SP_T_INT) return a.i > b.i;\n");
-        emit_raw(ctx, "    if (a.tag == SP_T_FLOAT || b.tag == SP_T_FLOAT) {\n");
-        emit_raw(ctx, "        double fa = a.tag == SP_T_FLOAT ? a.f : (double)a.i;\n");
-        emit_raw(ctx, "        double fb = b.tag == SP_T_FLOAT ? b.f : (double)b.i;\n");
+        emit_raw(ctx, "    if (SP_TAG_A == SP_T_INT && SP_TAG_B == SP_T_INT) return SP_AI > SP_BI;\n");
+        emit_raw(ctx, "    if (SP_TAG_A == SP_T_FLOAT || SP_TAG_B == SP_T_FLOAT) {\n");
+        emit_raw(ctx, "        double fa = SP_TAG_A == SP_T_FLOAT ? SP_AF : (double)SP_AI;\n");
+        emit_raw(ctx, "        double fb = SP_TAG_B == SP_T_FLOAT ? SP_BF : (double)SP_BI;\n");
         emit_raw(ctx, "        return fa > fb;\n");
         emit_raw(ctx, "    }\n");
         emit_raw(ctx, "    sp_raise(\"TypeError: > not defined\"); return 0;\n");
         emit_raw(ctx, "}\n\n");
 
         emit_raw(ctx, "static mrb_bool sp_poly_lt(sp_RbValue a, sp_RbValue b) {\n");
-        emit_raw(ctx, "    if (a.tag == SP_T_INT && b.tag == SP_T_INT) return a.i < b.i;\n");
-        emit_raw(ctx, "    if (a.tag == SP_T_FLOAT || b.tag == SP_T_FLOAT) {\n");
-        emit_raw(ctx, "        double fa = a.tag == SP_T_FLOAT ? a.f : (double)a.i;\n");
-        emit_raw(ctx, "        double fb = b.tag == SP_T_FLOAT ? b.f : (double)b.i;\n");
+        emit_raw(ctx, "    if (SP_TAG_A == SP_T_INT && SP_TAG_B == SP_T_INT) return SP_AI < SP_BI;\n");
+        emit_raw(ctx, "    if (SP_TAG_A == SP_T_FLOAT || SP_TAG_B == SP_T_FLOAT) {\n");
+        emit_raw(ctx, "        double fa = SP_TAG_A == SP_T_FLOAT ? SP_AF : (double)SP_AI;\n");
+        emit_raw(ctx, "        double fb = SP_TAG_B == SP_T_FLOAT ? SP_BF : (double)SP_BI;\n");
         emit_raw(ctx, "        return fa < fb;\n");
         emit_raw(ctx, "    }\n");
         emit_raw(ctx, "    sp_raise(\"TypeError: < not defined\"); return 0;\n");
         emit_raw(ctx, "}\n\n");
 
         emit_raw(ctx, "static mrb_bool sp_poly_ge(sp_RbValue a, sp_RbValue b) {\n");
-        emit_raw(ctx, "    if (a.tag == SP_T_INT && b.tag == SP_T_INT) return a.i >= b.i;\n");
-        emit_raw(ctx, "    if (a.tag == SP_T_FLOAT || b.tag == SP_T_FLOAT) {\n");
-        emit_raw(ctx, "        double fa = a.tag == SP_T_FLOAT ? a.f : (double)a.i;\n");
-        emit_raw(ctx, "        double fb = b.tag == SP_T_FLOAT ? b.f : (double)b.i;\n");
+        emit_raw(ctx, "    if (SP_TAG_A == SP_T_INT && SP_TAG_B == SP_T_INT) return SP_AI >= SP_BI;\n");
+        emit_raw(ctx, "    if (SP_TAG_A == SP_T_FLOAT || SP_TAG_B == SP_T_FLOAT) {\n");
+        emit_raw(ctx, "        double fa = SP_TAG_A == SP_T_FLOAT ? SP_AF : (double)SP_AI;\n");
+        emit_raw(ctx, "        double fb = SP_TAG_B == SP_T_FLOAT ? SP_BF : (double)SP_BI;\n");
         emit_raw(ctx, "        return fa >= fb;\n");
         emit_raw(ctx, "    }\n");
         emit_raw(ctx, "    sp_raise(\"TypeError: >= not defined\"); return 0;\n");
         emit_raw(ctx, "}\n\n");
 
         emit_raw(ctx, "static mrb_bool sp_poly_le(sp_RbValue a, sp_RbValue b) {\n");
-        emit_raw(ctx, "    if (a.tag == SP_T_INT && b.tag == SP_T_INT) return a.i <= b.i;\n");
-        emit_raw(ctx, "    if (a.tag == SP_T_FLOAT || b.tag == SP_T_FLOAT) {\n");
-        emit_raw(ctx, "        double fa = a.tag == SP_T_FLOAT ? a.f : (double)a.i;\n");
-        emit_raw(ctx, "        double fb = b.tag == SP_T_FLOAT ? b.f : (double)b.i;\n");
+        emit_raw(ctx, "    if (SP_TAG_A == SP_T_INT && SP_TAG_B == SP_T_INT) return SP_AI <= SP_BI;\n");
+        emit_raw(ctx, "    if (SP_TAG_A == SP_T_FLOAT || SP_TAG_B == SP_T_FLOAT) {\n");
+        emit_raw(ctx, "        double fa = SP_TAG_A == SP_T_FLOAT ? SP_AF : (double)SP_AI;\n");
+        emit_raw(ctx, "        double fb = SP_TAG_B == SP_T_FLOAT ? SP_BF : (double)SP_BI;\n");
         emit_raw(ctx, "        return fa <= fb;\n");
         emit_raw(ctx, "    }\n");
         emit_raw(ctx, "    sp_raise(\"TypeError: <= not defined\"); return 0;\n");
         emit_raw(ctx, "}\n\n");
 
         emit_raw(ctx, "static mrb_bool sp_poly_eq(sp_RbValue a, sp_RbValue b) {\n");
-        emit_raw(ctx, "    if (a.tag != b.tag) return 0;\n");
-        emit_raw(ctx, "    switch (a.tag) {\n");
-        emit_raw(ctx, "        case SP_T_INT: return a.i == b.i;\n");
-        emit_raw(ctx, "        case SP_T_FLOAT: return a.f == b.f;\n");
-        emit_raw(ctx, "        case SP_T_STRING: return strcmp(a.s, b.s) == 0;\n");
-        emit_raw(ctx, "        case SP_T_BOOL: return a.i == b.i;\n");
-        emit_raw(ctx, "        case SP_T_NIL: return 1;\n");
-        emit_raw(ctx, "        default: return a.p == b.p;\n");
-        emit_raw(ctx, "    }\n");
+        emit_raw(ctx, "    if (SP_TAG_A != SP_TAG_B) return 0;\n");
+        emit_raw(ctx, "    if (SP_TAG_A == SP_T_INT) return SP_AI == SP_BI;\n");
+        emit_raw(ctx, "    if (SP_TAG_A == SP_T_FLOAT) return SP_AF == SP_BF;\n");
+        emit_raw(ctx, "    if (SP_TAG_A == SP_T_STRING) return strcmp(sp_unbox_str(a), sp_unbox_str(b)) == 0;\n");
+        emit_raw(ctx, "    if (SP_TAG_A == SP_T_BOOL) return sp_unbox_bool(a) == sp_unbox_bool(b);\n");
+        emit_raw(ctx, "    if (SP_TAG_A == SP_T_NIL) return 1;\n");
+        emit_raw(ctx, "    return sp_unbox_obj(a) == sp_unbox_obj(b);\n");
         emit_raw(ctx, "}\n\n");
 
         emit_raw(ctx, "static mrb_bool sp_poly_neq(sp_RbValue a, sp_RbValue b) {\n");
@@ -9800,34 +9827,34 @@ static void emit_mega_dispatch_funcs(codegen_ctx_t *ctx) {
 
         if (returns_string) {
             emit_raw(ctx, "static const char *sp_dispatch_%s(sp_RbValue obj) {\n", mname);
-            emit_raw(ctx, "    switch (obj.tag) {\n");
+            emit_raw(ctx, "    uint16_t t = SP_TAG(obj);\n");
             for (int ci = 0; ci < nc; ci++) {
                 const char *cn = ctx->mega_dispatch[i].class_names[ci];
-                emit_raw(ctx, "    case SP_TAG_%s: return sp_%s_%s((sp_%s *)obj.p);\n",
-                         cn, cn, mname, cn);
+                emit_raw(ctx, "    %s (t == SP_TAG_%s) return sp_%s_%s((sp_%s *)sp_unbox_obj(obj));\n",
+                         ci == 0 ? "if" : "else if", cn, cn, mname, cn);
             }
-            emit_raw(ctx, "    default: return \"\";\n");
-            emit_raw(ctx, "    }\n");
+            emit_raw(ctx, "    return \"\";\n");
             emit_raw(ctx, "}\n\n");
         } else {
             emit_raw(ctx, "static sp_RbValue sp_dispatch_%s(sp_RbValue obj) {\n", mname);
-            emit_raw(ctx, "    switch (obj.tag) {\n");
+            emit_raw(ctx, "    uint16_t t = SP_TAG(obj);\n");
             for (int ci = 0; ci < nc; ci++) {
                 const char *cn = ctx->mega_dispatch[i].class_names[ci];
                 class_info_t *cls = find_class(ctx, cn);
                 method_info_t *mi = cls ? find_method_inherited(ctx, cls, ctx->mega_dispatch[i].method_name, NULL) : NULL;
-                char *call_expr = sfmt("sp_%s_%s((sp_%s *)obj.p)", cn, mname, cn);
+                char *call_expr = sfmt("sp_%s_%s((sp_%s *)sp_unbox_obj(obj))", cn, mname, cn);
                 if (mi) {
                     char *boxed = poly_box_expr_vt(ctx, mi->return_type, call_expr);
-                    emit_raw(ctx, "    case SP_TAG_%s: return %s;\n", cn, boxed);
+                    emit_raw(ctx, "    %s (t == SP_TAG_%s) return %s;\n",
+                             ci == 0 ? "if" : "else if", cn, boxed);
                     free(boxed);
                 } else {
-                    emit_raw(ctx, "    case SP_TAG_%s: return sp_box_nil();\n", cn);
+                    emit_raw(ctx, "    %s (t == SP_TAG_%s) return sp_box_nil();\n",
+                             ci == 0 ? "if" : "else if", cn);
                 }
                 free(call_expr);
             }
-            emit_raw(ctx, "    default: return sp_box_nil();\n");
-            emit_raw(ctx, "    }\n");
+            emit_raw(ctx, "    return sp_box_nil();\n");
             emit_raw(ctx, "}\n\n");
         }
     }
@@ -9950,7 +9977,7 @@ void codegen_program(codegen_ctx_t *ctx, pm_node_t *root) {
 
     /* Assign class_tag to each class (for POLY dispatch) */
     for (int i = 0; i < ctx->class_count; i++)
-        ctx->classes[i].class_tag = 64 + i; /* SP_T_CLASS_BASE = 64 */
+        ctx->classes[i].class_tag = 0x0040 + i; /* NaN-box class tag base */
 
     /* Detect needs_sp_string: any SP_STRING-typed variable triggers mutable string runtime */
     for (int i = 0; i < ctx->var_count; i++) {
