@@ -10,7 +10,7 @@ Spinel compiles Ruby source code to standalone C executables via
 - **No runtime dependencies**: generated binaries need only libc and libm.
   Mark-and-sweep GC is generated inline. Regexp programs link with libonig.
 
-~10500 lines of C. 47 test programs. 44/44 automated tests pass.
+~12200 lines of C. 54 test programs. 53/53 automated tests pass.
 
 ## Quick Start
 
@@ -69,18 +69,18 @@ cc -O2 -lm → native binary
 
 | Category | Features |
 |----------|----------|
-| **OOP** | Classes, inheritance (`< Parent`), `super`, `include` (mixin), `attr_accessor`/`reader`/`writer`, class methods (`def self.foo`), `Struct.new`, `alias`, `Comparable` (operator methods) |
-| **Blocks & Closures** | `yield`, `block_given?`, `&block`, `proc {}`, `Proc.new`, `Proc#call`, `method(:name)`, `Array#each/map/select/reject/reduce`, `Hash#each`, `Integer#times/upto/downto`, lambda `-> x { }`, `Enumerable` |
-| **Control Flow** | `if`/`elsif`/`else`, `unless`, `case`/`when`, **`case`/`in` (pattern matching)**, `while`, `until`, `loop`, `for..in`, `break`, `next`, `return`, `catch`/`throw`, ternary, `and`/`or`/`not` |
+| **OOP** | Classes, inheritance (`< Parent`), `super`, `include` (mixin), `attr_accessor`/`reader`/`writer`, class methods (`def self.foo`), `Struct.new` (incl. `keyword_init: true`), `alias`, `Comparable` (operator methods), module constants (`Module::CONST`) |
+| **Blocks & Closures** | `yield`, `block_given?`, `&block`, `proc {}`, `Proc.new`, `Proc#call`, `method(:name)`, `Array#each/map/select/reject/reduce/count/sort_by/min_by/max_by`, `Hash#each`, `Integer#times/upto/downto`, lambda `-> x { }`, `Enumerable` |
+| **Control Flow** | `if`/`elsif`/`else`, `unless`, `case`/`when`, **`case`/`in` (pattern matching)**, `while`, `until`, `loop`, `for..in`, `break`, `next`, `return`, `catch`/`throw`, ternary, `and`/`or`/`not`, `&.` (safe navigation) |
 | **Exceptions** | `begin`/`rescue`/`ensure`/`retry`, `raise "msg"`, `raise ClassName, "msg"`, `rescue ClassName => e` (class hierarchy), custom exception classes |
 | **Parameters** | Positional, default values, keyword (`name:, greeting: "Hello"`), rest/splat (`*args`) |
 | **Polymorphism** | Variables holding multiple types, heterogeneous arrays `[1, "two", 3.0]`, heterogeneous Hash `{name: "Alice", age: 30}`, duck typing (bimorphic + megamorphic dispatch), `case/in` pattern matching |
 | **Types** | Integer, Float, Boolean, String (immutable `const char *` + mutable `sp_String`), Symbol, nil, Range, Time |
-| **Collections** | Integer arrays (push/pop/shift/sort/min/max/sum/reduce/join/uniq), Hash (String→Int, heterogeneous), String arrays (split results) |
-| **Strings** | 20+ methods: length, upcase, downcase, strip, reverse, gsub, sub, split, capitalize, chomp, include?, start\_with?, end\_with?, count, `+`, `<<`, `*`, `[]`, replace, clear, comparison (`==`/`<`) |
+| **Collections** | Integer arrays (push/pop/shift/sort/sort\_by/min/max/min\_by/max\_by/sum/reduce/count/join/uniq), Hash (String→Int, heterogeneous), String arrays (split results, count/find/any?/max\_by/filter\_map) |
+| **Strings** | 35+ methods: length, upcase, downcase, strip, lstrip, rstrip, reverse, gsub, sub, split, capitalize, chomp, include?, start\_with?, end\_with?, count, ljust, rjust, center, tr, delete, squeeze, chars, bytes, to\_f, to\_i, hex, oct, slice, dup, freeze, frozen?, `+`, `<<`, `*`, `[]`, `[range]`, replace, clear, comparison (`==`/`<`) |
 | **Regexp** | `/pattern/`, `=~`, `$1`-`$9`, `match?`, `gsub`, `sub`, `scan`, `split` (via oniguruma) |
 | **Numeric** | `abs`, `even?`, `odd?`, `zero?`, `positive?`, `negative?`, `ceil`, `floor`, `round`, `**`, `to_f`, `to_i`, `to_s` |
-| **I/O** | `puts`/`print`/`printf`/`putc`/`p`, `File.read/write/exist?/delete`, `ARGV`, `$stderr.puts`, `exit`, `sleep` |
+| **I/O** | `puts`/`print`/`printf`/`putc`/`p`, `File.read/write/exist?/delete/open(block)`, `ARGV`, `$stderr.puts`, `exit`, `sleep` |
 | **Introspection** | `is_a?` (compile-time), `respond_to?` (compile-time), `nil?`, `defined?`, `__LINE__`, `__FILE__`, `__method__`, `freeze`/`frozen?` |
 | **Multi-file** | `require_relative` (compile-time file resolution and merging) |
 | **Runtime** | Mark-and-sweep GC (shadow stack), arena allocator (closures), NaN-boxed polymorphic values (8 bytes) |
@@ -108,7 +108,7 @@ Monomorphic code uses unboxed C types — zero overhead.
 ## Test Suite
 
 ```bash
-make test-all    # 44 tests, all pass
+make test-all    # 53 tests, all pass
 make test        # quick: mandelbrot only
 ```
 
@@ -119,8 +119,8 @@ spinel/
 ├── src/
 │   ├── main.c          # CLI, file reading, Prism parsing, require resolution
 │   ├── codegen.h       # Type system, class/method/module info structs
-│   └── codegen.c       # Multi-pass code generator (~10500 lines)
-├── examples/           # 47 test programs (44 automated)
+│   └── codegen.c       # Multi-pass code generator (~12200 lines)
+├── examples/           # 54 test programs (53 automated)
 ├── prototype/
 │   └── tools/          # RBS extraction, LumiTrace prototype tools
 ├── Makefile            # build, test, test-all

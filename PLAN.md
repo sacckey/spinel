@@ -10,7 +10,7 @@ Regexp対応プログラムのみ libonig をリンク。
 
 ## 現状 (Status)
 
-### コンパイラアーキテクチャ (~10500行のC)
+### コンパイラアーキテクチャ (~12200行のC)
 
 - Prism (libprism) によるRubyパース
 - 多パスコード生成:
@@ -94,7 +94,7 @@ Regexp対応プログラムのみ libonig をリンク。
 | | シャドウスタックルート管理, ファイナライザ |
 | | GC不要なプログラムではGCコード省略 |
 
-### テストプログラム (47例)
+### テストプログラム (54例)
 
 | プログラム | テスト対象 |
 |-----------|-----------|
@@ -163,8 +163,8 @@ Regexp使用時のみ libonig をリンク。
 | 2 | **require / load / gem** | 未着手 | ファイル解決 + AST統合 |
 | 3 | **Block/Proc完全性** | **完了** ✅ | yield, &block, Proc.new, proc {}, method(:name) |
 | 4 | **組込クラス** | **ほぼ完了** ✅ | File, Time, Range, Enumerable 対応済み |
-| 5 | **完全なString** | 未着手 | sp_String構造体 (ミュータブル + encoding) |
-| 6 | **オブジェクトシステム完全性** | 一部完了 | Comparable完了。method_missing等はフォールバック |
+| 5 | **完全なString** | **大幅拡充** ✅ | 35+メソッド、sp_String 25+メソッド委譲 |
+| 6 | **オブジェクトシステム完全性** | 一部完了 | Comparable完了。module constants完了。method_missing等はフォールバック |
 | 7 | **制御フロー完全性** | **完了** ✅ | catch/throw含む全制御フロー |
 | 8 | **パターンマッチ** | **完了** ✅ | case/in (型/値/nil/alternation) |
 | 9 | **例外階層** | **完了** ✅ | raise ClassName, rescue ClassName, 継承チェック |
@@ -183,6 +183,13 @@ Regexp使用時のみ libonig をリンク。
 - ✅ `ARGV`, `$stderr.puts`, `exit`, `srand`/`rand`, `String#[]`
 - ✅ `File.read/write/exist?/delete`
 - ✅ `Array#sort/sort!/min/max/sum/reduce/inject/join/uniq`
+- ✅ `Array#count(block)/sort_by/min_by/max_by`, `StrArray#count(block)`
+- ✅ `String#ljust/rjust/center/lstrip/rstrip/tr/delete/squeeze/chars/bytes/to_f/slice/hex/oct/dup/[range]`
+- ✅ `sp_String` 25+メソッド委譲: downcase, strip, chomp, start_with?, etc.
+- ✅ `Struct.new(keyword_init: true)` — キーワード引数コンストラクタ
+- ✅ `File.open` with block
+- ✅ `&.` (safe navigation operator) — 単相コードでは透過的に動作
+- ✅ Module constants (`Module::CONST`) — 型推論付き (STRING/BOOLEAN/HASH対応)
 
 ---
 
