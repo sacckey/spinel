@@ -1391,6 +1391,17 @@ static vtype_t infer_type(codegen_ctx_t *ctx, pm_node_t *node) {
                 if (strcmp(method, "to_i") == 0 || strcmp(method, "ord") == 0) { free(method); return vt_prim(SPINEL_TYPE_INTEGER); }
                 if (strcmp(method, "to_sym") == 0) { free(method); return vt_prim(SPINEL_TYPE_STRING); }
                 if (strcmp(method, "each_line") == 0) { free(method); return vt_prim(SPINEL_TYPE_STR_ARRAY); }
+                if (strcmp(method, "to_f") == 0) { free(method); return vt_prim(SPINEL_TYPE_FLOAT); }
+                if (strcmp(method, "ljust") == 0 || strcmp(method, "rjust") == 0 ||
+                    strcmp(method, "center") == 0 || strcmp(method, "lstrip") == 0 ||
+                    strcmp(method, "rstrip") == 0 || strcmp(method, "tr") == 0 ||
+                    strcmp(method, "delete") == 0 || strcmp(method, "squeeze") == 0 ||
+                    strcmp(method, "slice") == 0 || strcmp(method, "dup") == 0 ||
+                    strcmp(method, "freeze") == 0 || strcmp(method, "to_s") == 0) { free(method); return vt_prim(SPINEL_TYPE_STRING); }
+                if (strcmp(method, "frozen?") == 0) { free(method); return vt_prim(SPINEL_TYPE_BOOLEAN); }
+                if (strcmp(method, "chars") == 0) { free(method); return vt_prim(SPINEL_TYPE_STR_ARRAY); }
+                if (strcmp(method, "bytes") == 0) { free(method); return vt_prim(SPINEL_TYPE_ARRAY); }
+                if (strcmp(method, "hex") == 0 || strcmp(method, "oct") == 0) { free(method); return vt_prim(SPINEL_TYPE_INTEGER); }
             }
             /* sp_String (mutable string) methods */
             if (recv_t.kind == SPINEL_TYPE_SP_STRING) {
@@ -3956,11 +3967,45 @@ static char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
             }
         }
 
-        /* String indexing: s[n] → sp_str_char_at */
+        /* String indexing: s[n] → sp_str_char_at, s[a..b] → sp_str_slice, s[n,len] → sp_str_slice */
         if (strcmp(method, "[]") == 0 && call->receiver && call->arguments &&
-            call->arguments->arguments.size == 1) {
+            call->arguments->arguments.size >= 1 && call->arguments->arguments.size <= 2) {
             vtype_t recv_t_pre = infer_type(ctx, call->receiver);
             if (recv_t_pre.kind == SPINEL_TYPE_STRING) {
+                pm_node_t *arg = call->arguments->arguments.nodes[0];
+                if (PM_NODE_TYPE(arg) == PM_RANGE_NODE) {
+                    /* s[start..end] → sp_str_slice */
+                    pm_range_node_t *rn = (pm_range_node_t *)arg;
+                    char *recv = codegen_expr(ctx, call->receiver);
+                    char *start = rn->left ? codegen_expr(ctx, rn->left) : xstrdup("0");
+                    if (rn->right) {
+                        char *end = codegen_expr(ctx, rn->right);
+                        /* Exclusive (..) vs inclusive (...) range */
+                        bool exclusive = (rn->base.flags & PM_RANGE_FLAGS_EXCLUDE_END);
+                        char *r;
+                        if (exclusive) {
+                            r = sfmt("sp_str_slice(%s, %s, (%s) - (%s))", recv, start, end, start);
+                        } else {
+                            r = sfmt("sp_str_slice(%s, %s, (%s) - (%s) + 1)", recv, start, end, start);
+                        }
+                        free(recv); free(start); free(end); free(method);
+                        return r;
+                    } else {
+                        /* s[start..] → slice to end */
+                        char *r = sfmt("sp_str_slice(%s, %s, (mrb_int)strlen(%s))", recv, start, recv);
+                        free(recv); free(start); free(method);
+                        return r;
+                    }
+                }
+                /* s[n, len] — two-arg form handled via slice */
+                if (call->arguments->arguments.size == 2) {
+                    char *recv = codegen_expr(ctx, call->receiver);
+                    char *start = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+                    char *len = codegen_expr(ctx, call->arguments->arguments.nodes[1]);
+                    char *r = sfmt("sp_str_slice(%s, %s, %s)", recv, start, len);
+                    free(recv); free(start); free(len); free(method);
+                    return r;
+                }
                 char *recv = codegen_expr(ctx, call->receiver);
                 char *idx = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
                 char *r = sfmt("sp_str_char_at(%s, %s)", recv, idx);
@@ -5001,6 +5046,86 @@ static char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
                     ctx->needs_str_split = true;
                     r = sfmt("sp_str_split(%s, \"\\n\")", recv);
                 }
+                else if (strcmp(method, "to_f") == 0)
+                    r = sfmt("sp_str_to_f(%s)", recv);
+                else if (strcmp(method, "ljust") == 0 && call->arguments) {
+                    char *w = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+                    if (call->arguments->arguments.size >= 2) {
+                        char *pad = codegen_expr(ctx, call->arguments->arguments.nodes[1]);
+                        r = sfmt("sp_str_ljust(%s, %s, (%s)[0])", recv, w, pad);
+                        free(pad);
+                    } else {
+                        r = sfmt("sp_str_ljust(%s, %s, ' ')", recv, w);
+                    }
+                    free(w);
+                }
+                else if (strcmp(method, "rjust") == 0 && call->arguments) {
+                    char *w = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+                    if (call->arguments->arguments.size >= 2) {
+                        char *pad = codegen_expr(ctx, call->arguments->arguments.nodes[1]);
+                        r = sfmt("sp_str_rjust(%s, %s, (%s)[0])", recv, w, pad);
+                        free(pad);
+                    } else {
+                        r = sfmt("sp_str_rjust(%s, %s, ' ')", recv, w);
+                    }
+                    free(w);
+                }
+                else if (strcmp(method, "center") == 0 && call->arguments) {
+                    char *w = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+                    if (call->arguments->arguments.size >= 2) {
+                        char *pad = codegen_expr(ctx, call->arguments->arguments.nodes[1]);
+                        r = sfmt("sp_str_center(%s, %s, (%s)[0])", recv, w, pad);
+                        free(pad);
+                    } else {
+                        r = sfmt("sp_str_center(%s, %s, ' ')", recv, w);
+                    }
+                    free(w);
+                }
+                else if (strcmp(method, "lstrip") == 0)
+                    r = sfmt("sp_str_lstrip(%s)", recv);
+                else if (strcmp(method, "rstrip") == 0)
+                    r = sfmt("sp_str_rstrip(%s)", recv);
+                else if (strcmp(method, "tr") == 0 && call->arguments &&
+                         call->arguments->arguments.size == 2) {
+                    char *from = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+                    char *to = codegen_expr(ctx, call->arguments->arguments.nodes[1]);
+                    r = sfmt("sp_str_tr(%s, %s, %s)", recv, from, to);
+                    free(from); free(to);
+                }
+                else if (strcmp(method, "delete") == 0 && call->arguments &&
+                         call->arguments->arguments.size == 1) {
+                    char *arg = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+                    r = sfmt("sp_str_delete(%s, %s)", recv, arg);
+                    free(arg);
+                }
+                else if (strcmp(method, "squeeze") == 0)
+                    r = sfmt("sp_str_squeeze(%s)", recv);
+                else if (strcmp(method, "chars") == 0) {
+                    ctx->needs_str_split = true; /* ensures sp_StrArray is emitted */
+                    r = sfmt("sp_str_chars(%s)", recv);
+                }
+                else if (strcmp(method, "bytes") == 0)
+                    r = sfmt("sp_str_bytes(%s)", recv);
+                else if (strcmp(method, "freeze") == 0)
+                    r = sfmt("%s", recv); /* no-op in AOT */
+                else if (strcmp(method, "frozen?") == 0)
+                    r = xstrdup("TRUE"); /* all strings frozen in AOT */
+                else if (strcmp(method, "to_s") == 0)
+                    r = sfmt("%s", recv); /* string.to_s → identity */
+                else if (strcmp(method, "dup") == 0) {
+                    r = sfmt("sp_str_concat(%s, \"\")", recv); /* copy */
+                }
+                else if (strcmp(method, "slice") == 0 && call->arguments &&
+                         call->arguments->arguments.size == 2) {
+                    char *start = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+                    char *len = codegen_expr(ctx, call->arguments->arguments.nodes[1]);
+                    r = sfmt("sp_str_slice(%s, %s, %s)", recv, start, len);
+                    free(start); free(len);
+                }
+                else if (strcmp(method, "hex") == 0)
+                    r = sfmt("((mrb_int)strtol(%s, NULL, 16))", recv);
+                else if (strcmp(method, "oct") == 0)
+                    r = sfmt("((mrb_int)strtol(%s, NULL, 8))", recv);
                 if (r) {
                     free(recv); free(method);
                     return r;
@@ -9314,6 +9439,60 @@ static void emit_header(codegen_ctx_t *ctx) {
     emit_raw(ctx, "    for (mrb_int i = 0; i < n; i++) memcpy(r + sl * i, s, sl);\n");
     emit_raw(ctx, "    r[sl * n] = '\\0'; return r;\n}\n\n");
 
+    /* ljust / rjust / center */
+    emit_raw(ctx, "static const char *sp_str_ljust(const char *s, mrb_int w, char pad) {\n");
+    emit_raw(ctx, "    size_t n = strlen(s); if ((mrb_int)n >= w) { char *r = (char *)malloc(n+1); memcpy(r,s,n+1); return r; }\n");
+    emit_raw(ctx, "    char *r = (char *)malloc(w+1); memcpy(r,s,n); memset(r+n,pad,w-n); r[w]='\\0'; return r;\n}\n");
+    emit_raw(ctx, "static const char *sp_str_rjust(const char *s, mrb_int w, char pad) {\n");
+    emit_raw(ctx, "    size_t n = strlen(s); if ((mrb_int)n >= w) { char *r = (char *)malloc(n+1); memcpy(r,s,n+1); return r; }\n");
+    emit_raw(ctx, "    char *r = (char *)malloc(w+1); memset(r,pad,w-n); memcpy(r+w-n,s,n+1); return r;\n}\n");
+    emit_raw(ctx, "static const char *sp_str_center(const char *s, mrb_int w, char pad) {\n");
+    emit_raw(ctx, "    size_t n = strlen(s); if ((mrb_int)n >= w) { char *r = (char *)malloc(n+1); memcpy(r,s,n+1); return r; }\n");
+    emit_raw(ctx, "    mrb_int left = (w - (mrb_int)n) / 2; mrb_int right = w - (mrb_int)n - left;\n");
+    emit_raw(ctx, "    char *r = (char *)malloc(w+1); memset(r,pad,w); memcpy(r+left,s,n); r[w]='\\0'; return r;\n}\n");
+
+    /* lstrip / rstrip */
+    emit_raw(ctx, "static const char *sp_str_lstrip(const char *s) {\n");
+    emit_raw(ctx, "    while (*s && isspace((unsigned char)*s)) s++;\n");
+    emit_raw(ctx, "    size_t n = strlen(s); char *r = (char *)malloc(n+1); memcpy(r,s,n+1); return r;\n}\n");
+    emit_raw(ctx, "static const char *sp_str_rstrip(const char *s) {\n");
+    emit_raw(ctx, "    size_t n = strlen(s);\n");
+    emit_raw(ctx, "    while (n > 0 && isspace((unsigned char)s[n-1])) n--;\n");
+    emit_raw(ctx, "    char *r = (char *)malloc(n+1); memcpy(r,s,n); r[n]='\\0'; return r;\n}\n");
+
+    /* tr / delete / squeeze */
+    emit_raw(ctx, "static const char *sp_str_tr(const char *s, const char *from, const char *to) {\n");
+    emit_raw(ctx, "    size_t n = strlen(s); char *r = (char *)malloc(n+1);\n");
+    emit_raw(ctx, "    size_t fl = strlen(from), tl = strlen(to);\n");
+    emit_raw(ctx, "    for (size_t i = 0; i <= n; i++) {\n");
+    emit_raw(ctx, "        const char *p = memchr(from, s[i], fl);\n");
+    emit_raw(ctx, "        if (p && s[i]) { size_t idx = p - from; r[i] = (idx < tl) ? to[idx] : to[tl-1]; }\n");
+    emit_raw(ctx, "        else r[i] = s[i];\n");
+    emit_raw(ctx, "    } return r;\n}\n");
+    emit_raw(ctx, "static const char *sp_str_delete(const char *s, const char *chars) {\n");
+    emit_raw(ctx, "    size_t n = strlen(s); char *r = (char *)malloc(n+1); size_t ri = 0;\n");
+    emit_raw(ctx, "    for (size_t i = 0; i < n; i++) { if (!memchr(chars, s[i], strlen(chars))) r[ri++] = s[i]; }\n");
+    emit_raw(ctx, "    r[ri] = '\\0'; return r;\n}\n");
+    emit_raw(ctx, "static const char *sp_str_squeeze(const char *s) {\n");
+    emit_raw(ctx, "    size_t n = strlen(s); char *r = (char *)malloc(n+1); size_t ri = 0;\n");
+    emit_raw(ctx, "    for (size_t i = 0; i < n; i++) { if (i == 0 || s[i] != s[i-1]) r[ri++] = s[i]; }\n");
+    emit_raw(ctx, "    r[ri] = '\\0'; return r;\n}\n");
+
+    /* slice / [range] */
+    emit_raw(ctx, "static const char *sp_str_slice(const char *s, mrb_int start, mrb_int len) {\n");
+    emit_raw(ctx, "    mrb_int sn = (mrb_int)strlen(s);\n");
+    emit_raw(ctx, "    if (start < 0) start += sn;\n");
+    emit_raw(ctx, "    if (start < 0) start = 0;\n");
+    emit_raw(ctx, "    if (start >= sn || len <= 0) { char *r = (char *)malloc(1); r[0]='\\0'; return r; }\n");
+    emit_raw(ctx, "    if (start + len > sn) len = sn - start;\n");
+    emit_raw(ctx, "    char *r = (char *)malloc(len+1); memcpy(r, s+start, len); r[len]='\\0'; return r;\n}\n");
+
+    /* to_f */
+    emit_raw(ctx, "static mrb_float sp_str_to_f(const char *s) { return strtod(s, NULL); }\n");
+
+    /* bytes/chars helpers emitted after array types (see below) */
+
+
     /* sp_str_char_at already emitted above */
 
     /* ---- Mutable string (sp_String) ---- */
@@ -9927,7 +10106,21 @@ static void emit_header(codegen_ctx_t *ctx) {
         emit_raw(ctx, "        size_t n = p - s; char *t = (char *)malloc(n+1); memcpy(t,s,n); t[n]='\\0'; sp_StrArray_push(a, t); s = p + dl;\n");
         emit_raw(ctx, "    }\n");
         emit_raw(ctx, "    return a;\n}\n\n");
+
+        /* chars → sp_StrArray (depends on sp_StrArray being defined) */
+        emit_raw(ctx, "static sp_StrArray *sp_str_chars(const char *s) {\n");
+        emit_raw(ctx, "    sp_StrArray *a = sp_StrArray_new();\n");
+        emit_raw(ctx, "    for (size_t i = 0; s[i]; i++) {\n");
+        emit_raw(ctx, "        char *c = (char *)malloc(2); c[0] = s[i]; c[1] = '\\0';\n");
+        emit_raw(ctx, "        sp_StrArray_push(a, c);\n");
+        emit_raw(ctx, "    } return a;\n}\n\n");
     }
+
+    /* bytes → sp_IntArray (depends on sp_IntArray being defined) */
+    emit_raw(ctx, "static sp_IntArray *sp_str_bytes(const char *s) {\n");
+    emit_raw(ctx, "    sp_IntArray *a = sp_IntArray_new();\n");
+    emit_raw(ctx, "    for (size_t i = 0; s[i]; i++) sp_IntArray_push(a, (unsigned char)s[i]);\n");
+    emit_raw(ctx, "    return a;\n}\n\n");
 
     /* sp_re_split — split string by regexp (depends on sp_StrArray) */
     if (ctx->needs_regexp && ctx->needs_str_split) {
@@ -10426,7 +10619,8 @@ static bool has_split_calls(codegen_ctx_t *ctx, pm_node_t *node) {
     }
     case PM_CALL_NODE: {
         pm_call_node_t *c = (pm_call_node_t *)node;
-        if (ceq(ctx, c->name, "split") || ceq(ctx, c->name, "each_line")) return true;
+        if (ceq(ctx, c->name, "split") || ceq(ctx, c->name, "each_line") ||
+            ceq(ctx, c->name, "chars")) return true;
         /* Dir.glob returns sp_StrArray */
         if (ceq(ctx, c->name, "glob") && c->receiver &&
             PM_NODE_TYPE(c->receiver) == PM_CONSTANT_READ_NODE) {
