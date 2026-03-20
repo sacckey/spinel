@@ -10,17 +10,28 @@ Regexp対応プログラムのみ libonig をリンク。
 
 ## 現状 (Status)
 
-### コンパイラアーキテクチャ (~12200行のC)
+### コンパイラアーキテクチャ (~12600行のC, 6ファイル)
+
+```
+src/
+├── codegen.h  (365行) — 型定義、構造体、共有関数宣言
+├── codegen.c (2318行) — オーケストレータ、ユーティリティ、クラス解析、
+│                         キャプチャ解析、ラムダ、require処理
+├── type.c    (2093行) — 型推論、型解決、型ヘルパー
+├── expr.c    (3692行) — 式コード生成
+├── stmt.c    (1938行) — 文コード生成
+└── emit.c    (2152行) — Cコード出力 (ヘッダ、構造体、メソッド)
+```
 
 - Prism (libprism) によるRubyパース
 - 多パスコード生成:
-  1. クラス/モジュール/関数解析 (継承チェーン、mixin解決、Struct.new展開含む)
-  2. 全変数・パラメータ・戻り値の型推論 (関数間解析)
-  3. C構造体・メソッド関数の生成 (GCスキャン関数含む)
-  4. ラムダ/クロージャのキャプチャ解析・コード生成
-  5. yield/ブロックのコールバック関数生成 (block_given?対応)
-  6. 正規表現パターンのプリコンパイル (oniguruma)
-  7. main()のトップレベルコード生成
+  1. クラス/モジュール/関数解析 (継承チェーン、mixin解決、Struct.new展開含む) — `codegen.c`
+  2. 全変数・パラメータ・戻り値の型推論 (関数間解析) — `type.c`
+  3. C構造体・メソッド関数の生成 (GCスキャン関数含む) — `emit.c`
+  4. ラムダ/クロージャのキャプチャ解析・コード生成 — `codegen.c`
+  5. yield/ブロックのコールバック関数生成 (block_given?対応) — `emit.c`
+  6. 正規表現パターンのプリコンパイル (oniguruma) — `emit.c`
+  7. main()のトップレベルコード生成 — `codegen.c`
 - マーク&スイープGC (シャドウスタック、ファイナライザ)
 - setjmp/longjmpベース例外処理 (クラス例外階層対応)
 - アリーナアロケータ (ラムダ/クロージャ用)
@@ -35,11 +46,13 @@ Regexp対応プログラムのみ libonig をリンク。
 | | `attr_accessor` / `attr_reader` / `attr_writer` |
 | | クラスメソッド (`def self.foo`) |
 | | `Struct.new(:x, :y)` — 合成クラス生成 |
+| | `Struct.new(keyword_init: true)` — キーワード引数コンストラクタ |
 | | `alias` — メソッド別名 |
 | | `freeze`/`frozen?` — AOTでは全値がfrozen扱い |
 | | getter/setter自動インライン化 |
 | | コンストラクタ (`.new`)、型付きオブジェクトへのメソッド呼び出し |
-| | モジュール (状態変数 + メソッド) |
+| | モジュール (状態変数 + メソッド + 定数) |
+| | Module constants (`Module::CONST`) — 型推論付き |
 | **イントロスペクション** | `is_a?` — 継承チェーンをコンパイル時に静的解決 |
 | | `respond_to?` — メソッドテーブルをコンパイル時に静的解決 |
 | | `nil?` — nil以外は常にFALSE |
@@ -47,6 +60,8 @@ Regexp対応プログラムのみ libonig をリンク。
 | **ブロック/クロージャ** | `yield`、ブロック付きメソッド呼び出し (キャプチャ変数) |
 | | `block_given?` — ブロックの有無チェック |
 | | `Array#each/map/select/reject/reduce/inject` (インライン化) |
+| | `Array#count(block)/sort_by/min_by/max_by/any?/find/filter_map` |
+| | `StrArray#count(block)/any?/find/max_by/filter_map` |
 | | `Hash#each` (キー/値ペア) |
 | | `Integer#times/upto/downto` with block → C forループ |
 | | `-> x { body }` ラムダ → Cクロージャ (キャプチャ解析) |
@@ -55,6 +70,7 @@ Regexp対応プログラムのみ libonig をリンク。
 | | for..in + Range, loop do |
 | | break, next, return |
 | | ternary, and/or/not |
+| | `&.` (safe navigation operator) |
 | | `__LINE__`, `__FILE__`, `__method__`, `defined?` |
 | | `catch`/`throw` (タグ付き非局所脱出) |
 | **例外処理** | begin/rescue/ensure/retry |
@@ -68,7 +84,7 @@ Regexp対応プログラムのみ libonig をリンク。
 | **型** | Integer, Float, Boolean, String, Symbol, nil → アンボックスC型 |
 | | 値型 (Vec: 3 floats → 値渡し) vs ポインタ型 |
 | **コレクション** | sp_IntArray (push/pop/shift/dup/reverse!/each/map/select/reject/reduce) |
-| | Array#first/last/include?/sort/sort!/min/max/sum/length |
+| | Array#first/last/include?/sort/sort!/sort_by/min/max/min_by/max_by/sum/count/length |
 | | sp_StrIntHash (文字列キー→整数値、each/has_key?/delete) |
 | | sp_StrArray (文字列配列、split結果用) |
 | | O(1) shift (デキュー方式のstartオフセット) |
@@ -78,23 +94,31 @@ Regexp対応プログラムのみ libonig をリンク。
 | **演算** | 算術 (+, -, *, /, %, **), 比較, ビット演算 |
 | | 単項マイナス, 複合代入 (+=, <<=) |
 | | Math.sqrt/cos/sin → C math関数 |
-| | Integer#abs/even?/odd?/zero?/positive?/negative? |
+| | Integer#abs/even?/odd?/zero?/positive?/negative?/clamp |
 | | Float#abs/ceil/floor/round |
 | **文字列** | リテラル、補間 → printf |
-| | 15+メソッド: length, upcase, downcase, strip, reverse |
+| | 35+メソッド: length, upcase, downcase, strip, lstrip, rstrip, reverse |
 | |   gsub, sub, split, capitalize, chomp |
-| |   include?, start_with?, end_with?, count |
+| |   include?, start_with?, end_with?, count, match?, empty? |
+| |   ljust, rjust, center, tr, delete, squeeze |
+| |   chars, bytes, to_f, to_i, hex, oct, slice, dup |
 | |   +, <<, * (連結、追記、繰り返し) |
 | |   ==, !=, <, > (strcmp比較) |
+| |   `[]` (文字インデックス), `[range]` (範囲スライス) |
+| | sp_String (ミュータブル): 上記に加え replace, clear, 25+メソッド委譲 |
 | | Integer#to_s, Integer#chr |
 | **I/O** | puts, print, printf, putc, p → stdio |
 | | puts: Integer, Float, Boolean, String対応 (末尾改行のRuby互換) |
 | | File.read, File.write, File.exist?, File.delete |
+| | File.open with block, File.join, File.basename, File.dirname |
+| | File.expand_path, File.size, File.mtime, File.ctime, File.readlink |
+| | File.rename, Dir.glob, Dir.home, ENV[] |
+| | system(), backtick (`cmd`), $stdin.getc |
 | **GC** | マーク&スイープ (非値型オブジェクト・配列・ハッシュ用) |
 | | シャドウスタックルート管理, ファイナライザ |
 | | GC不要なプログラムではGCコード省略 |
 
-### テストプログラム (54例)
+### テストプログラム (53例自動テスト / 54ファイル)
 
 | プログラム | テスト対象 |
 |-----------|-----------|
@@ -111,6 +135,7 @@ Regexp対応プログラムのみ libonig をリンク。
 | bm_hash | Hash操作 |
 | bm_strings | Symbol、基本文字列メソッド |
 | bm_strings2 | 高度な文字列メソッド、split、比較 |
+| bm_strings3 | ljust/rjust/center/tr/delete/squeeze/chars/bytes/slice/[range] |
 | bm_numeric | 数値メソッド (abs, ceil, even?, **) |
 | bm_attr | attr_accessor、for..in、loop、クラスメソッド |
 | bm_kwargs | キーワード引数、スプラット |
@@ -119,12 +144,15 @@ Regexp対応プログラムのみ libonig をリンク。
 | bm_regexp | 正規表現 (=~, $1, match?, gsub, sub, scan, split) |
 | bm_introspect | is_a?, respond_to?, nil?, positive?, negative? |
 | bm_struct | Struct.new |
+| bm_struct_kw | Struct.new(keyword_init: true) |
 | bm_array2 | Array#reject/first/last/include? |
+| bm_array3 | Array#count(block)/sort_by/min_by/max_by, StrArray#count |
 | bm_sort_reduce | Array#sort/min/max/sum/reduce/inject |
 | bm_control | __LINE__, __FILE__, defined? |
 | bm_exceptions | raise ClassName, rescue ClassName, 例外階層 |
 | bm_block2 | block_given?, ブロック付きyield呼び出し |
 | bm_fileio | File.read/write/exist?/delete |
+| bm_fileopen | File.open with block |
 | bm_catch | catch/throw (タグ付き非局所脱出) |
 | bm_features | __method__, freeze/frozen? |
 | bm_comparable | Comparable演算子メソッド、alias |
@@ -138,6 +166,9 @@ Regexp対応プログラムのみ libonig をリンク。
 | bm_poly | 多相変数 (sp_RbValue Phase 1) |
 | bm_poly2 | 異種配列, bimorphicダックタイピング (Phase 2) |
 | bm_pattern | パターンマッチ case/in (Phase 3) |
+| bm_mutable_str3 | sp_String 追加メソッド (downcase, strip, start_with?等) |
+| bm_safe_nav | &. (safe navigation operator) |
+| bm_constants | モジュール定数、トップレベル定数 |
 
 ### ベンチマーク結果
 
@@ -159,13 +190,13 @@ Regexp使用時のみ libonig をリンク。
 
 | # | カテゴリ | 状態 | 次のアクション |
 |---|---------|------|-------------|
-| 1 | **動的型付け / ポリモーフィズム** | **Phase 2完了** ✅ | Phase 3: パターンマッチ |
-| 2 | **require / load / gem** | 未着手 | ファイル解決 + AST統合 |
+| 1 | **動的型付け / ポリモーフィズム** | **Phase 7完了** ✅ | NaN-boxing, 3段階dispatch |
+| 2 | **require / load / gem** | **require_relative完了** ✅ | load/gemは未着手 |
 | 3 | **Block/Proc完全性** | **完了** ✅ | yield, &block, Proc.new, proc {}, method(:name) |
 | 4 | **組込クラス** | **ほぼ完了** ✅ | File, Time, Range, Enumerable 対応済み |
 | 5 | **完全なString** | **大幅拡充** ✅ | 35+メソッド、sp_String 25+メソッド委譲 |
 | 6 | **オブジェクトシステム完全性** | 一部完了 | Comparable完了。module constants完了。method_missing等はフォールバック |
-| 7 | **制御フロー完全性** | **完了** ✅ | catch/throw含む全制御フロー |
+| 7 | **制御フロー完全性** | **完了** ✅ | catch/throw, &. 含む全制御フロー |
 | 8 | **パターンマッチ** | **完了** ✅ | case/in (型/値/nil/alternation) |
 | 9 | **例外階層** | **完了** ✅ | raise ClassName, rescue ClassName, 継承チェック |
 | 10 | **GC完全性** | 一部完了 | 文字列GC (sp_String), 世代別GC |
@@ -182,14 +213,27 @@ Regexp使用時のみ libonig をリンク。
 - ✅ `catch`/`throw`, `alias`, `freeze`/`frozen?`, `__method__`, `sleep`
 - ✅ `ARGV`, `$stderr.puts`, `exit`, `srand`/`rand`, `String#[]`
 - ✅ `File.read/write/exist?/delete`
+- ✅ `File.open` with block, `File.join/basename/dirname/expand_path/size/mtime/ctime/readlink/rename`
+- ✅ `Dir.glob`, `Dir.home`, `ENV[]`, `system()`, backtick, `$stdin.getc`
 - ✅ `Array#sort/sort!/min/max/sum/reduce/inject/join/uniq`
 - ✅ `Array#count(block)/sort_by/min_by/max_by`, `StrArray#count(block)`
 - ✅ `String#ljust/rjust/center/lstrip/rstrip/tr/delete/squeeze/chars/bytes/to_f/slice/hex/oct/dup/[range]`
 - ✅ `sp_String` 25+メソッド委譲: downcase, strip, chomp, start_with?, etc.
 - ✅ `Struct.new(keyword_init: true)` — キーワード引数コンストラクタ
-- ✅ `File.open` with block
 - ✅ `&.` (safe navigation operator) — 単相コードでは透過的に動作
 - ✅ Module constants (`Module::CONST`) — 型推論付き (STRING/BOOLEAN/HASH対応)
+- ✅ **NaN-boxing** (8バイト favor pointer, JSC方式)
+- ✅ **ソースコード分割**: codegen.c (12200行) → 5ファイル (最大3700行)
+
+### 未実装の主要機能
+- JSON.parse / JSON.generate (cJSONライブラリ連携)
+- Thread.new / Mutex (pthreads連携)
+- IO.console / winsize (ioctl)
+- method_missing / respond_to_missing?
+- open classes / monkey patching
+- eval / binding
+- Fiber
+- load / gem require
 
 ---
 
@@ -206,298 +250,39 @@ Regexp使用時のみ libonig をリンク。
   変数が複数の型    → sp_RbValue (ボックス化タグ付きユニオン)
 ```
 
-### sp_RbValue: 汎用ボックス型
+### sp_RbValue: NaN-boxed 8バイト値 (JSC方式, favor pointer)
 
 ```c
-// Phase 1: 16バイトタグ付きユニオン (シンプル、デバッグ容易)
-enum sp_tag {
-    SP_T_INT, SP_T_FLOAT, SP_T_BOOL, SP_T_NIL,
-    SP_T_STRING, SP_T_SYMBOL, SP_T_ARRAY, SP_T_HASH,
-    SP_T_OBJECT, SP_T_PROC, SP_T_REGEXP
-};
+typedef uint64_t sp_RbValue;  // 8バイト
 
-typedef struct {
-    enum sp_tag tag;
-    union {
-        int64_t i;       // SP_T_INT
-        double f;        // SP_T_FLOAT
-        const char *s;   // SP_T_STRING, SP_T_SYMBOL
-        void *p;         // SP_T_OBJECT, SP_T_ARRAY, SP_T_HASH, SP_T_PROC
-    };
-} sp_RbValue;  // 16 bytes
-
-// NaN-boxing 完了: 8バイト、favor pointer (JSC方式)
+// レイアウト:
+//   ポインタ:  0x0000_XXXX_XXXX_XXX0  抽出: (void *)v          コスト: ゼロ
+//   Integer:   0x0001_XXXX_XXXX_XXXX  抽出: 符号拡張48ビット    コスト: shift+extend
+//   Double:    元のdoubleビット + 2^49                           コスト: 減算1回
+//   Bool:      0x0002_0000_0000_000{0,1}
+//   Nil:       0x0003_0000_0000_0000
+//   クラスタグ: 0x0004+N (class_id encoded)
 ```
 
 ### 3段階メソッドディスパッチ
 
-JITコンパイラのインラインキャッシュと同じ発想。多相度に応じて最適な方式を選択。
+| 多相度 | 名称 | 方式 | 速度 |
+|--------|------|------|------|
+| 1型 | **monomorphic** | 直接呼び出し (現行) | 最速 |
+| 2型 | **bimorphic** | call-site inline switch | 高速 |
+| 3型以上 | **megamorphic** | dispatch関数 | 中速 |
 
-| 多相度 | 名称 | 方式 | コード例 | 速度 |
-|--------|------|------|---------|------|
-| 1型 | **monomorphic** | 直接呼び出し (現行) | `sp_Duck_speak(obj)` | 最速 |
-| 2型 | **bimorphic** | call-site inline switch | `if (obj.tag == T_DUCK) ... else ...` | 高速 |
-| 3型以上 | **megamorphic** | dispatch関数 | `sp_dispatch_speak(obj)` | 中速 |
-
-#### Monomorphic (型が1つに確定 — 変更なし)
-
-```c
-// 型推論で obj: Duck と確定 → 直接呼び出し
-sp_Duck_speak(lv_obj);
-```
-
-現在の全37例がこのパス。**性能影響ゼロ**。
-
-#### Bimorphic (2型のUnion — call-site switch)
-
-```c
-// 型推論で obj: Duck | Person と判明 → call siteでswitch
-if (lv_obj.tag == SP_T_DUCK)
-    result = sp_box_str(sp_Duck_speak((sp_Duck *)lv_obj.p));
-else
-    result = sp_box_str(sp_Person_speak((sp_Person *)lv_obj.p));
-```
-
-実用上最も頻出するケース:
-- `Integer | Float` (数値演算)
-- `SomeClass | nil` (nilable)
-- `ClassA | ClassB` (2種の具象型)
-
-関数呼び出しオーバーヘッドゼロ。Cコンパイラの分岐予測最適化が効く。
-
-#### Megamorphic (3型以上 — dispatch関数)
-
-```c
-// コンパイル末尾で自動生成: speakを持つ全クラスを集約
-sp_RbValue sp_dispatch_speak(sp_RbValue obj) {
-    switch (obj.tag) {
-        case SP_T_DUCK:   return sp_box_str(sp_Duck_speak((sp_Duck *)obj.p));
-        case SP_T_PERSON: return sp_box_str(sp_Person_speak((sp_Person *)obj.p));
-        case SP_T_ROBOT:  return sp_box_str(sp_Robot_speak((sp_Robot *)obj.p));
-        default:          sp_raise("NoMethodError: speak");
-    }
-}
-
-// call siteはシンプル
-result = sp_dispatch_speak(lv_obj);
-```
-
-dispatch関数はメソッド名ごとに1つ。コンパイル時に全クラス情報があるため、
-実行時ハッシュ不要の有限switch文で実装。
-
-### Boxing / Unboxing
-
-```c
-// Boxing: アンボックス型 → sp_RbValue
-sp_RbValue sp_box_int(int64_t n)      { return (sp_RbValue){SP_T_INT,    .i = n}; }
-sp_RbValue sp_box_float(double f)     { return (sp_RbValue){SP_T_FLOAT,  .f = f}; }
-sp_RbValue sp_box_str(const char *s)  { return (sp_RbValue){SP_T_STRING, .s = s}; }
-sp_RbValue sp_box_bool(int b)         { return (sp_RbValue){SP_T_BOOL,   .i = b}; }
-sp_RbValue sp_box_nil(void)           { return (sp_RbValue){SP_T_NIL,    .i = 0}; }
-
-// Unboxing: sp_RbValue → アンボックス型 (型チェック付き)
-int64_t sp_unbox_int(sp_RbValue v)    { return v.i; }
-double sp_unbox_float(sp_RbValue v)   { return v.tag == SP_T_FLOAT ? v.f : (double)v.i; }
-const char *sp_unbox_str(sp_RbValue v){ return v.s; }
-```
-
-Boxing/Unboxingは**MONO↔POLY境界**でのみ発生:
-```ruby
-def add(a, b)   # a: Integer (MONO) → アンボックスのまま
-  a + b         # → lv_a + lv_b (直接C演算)
-end
-
-def show(x)     # x: Integer | String (POLY) → sp_RbValue
-  puts x        # → sp_dispatch_puts(lv_x)
-end
-
-n = add(1, 2)   # n: Integer (MONO)
-show(n)          # ← ここでboxingが発生: sp_box_int(lv_n)
-show("hello")   # ← sp_box_str("hello")
-```
-
-### 組込型の演算ディスパッチ
-
-```c
-// sp_RbValue上の + 演算 (bimorphic: Integer | Float)
-if (a.tag == SP_T_INT && b.tag == SP_T_INT)
-    result = sp_box_int(a.i + b.i);           // 整数加算
-else
-    result = sp_box_float(                     // Float昇格
-        (a.tag == SP_T_FLOAT ? a.f : (double)a.i) +
-        (b.tag == SP_T_FLOAT ? b.f : (double)b.i));
-
-// sp_RbValue上の puts (megamorphic: 全型)
-sp_RbValue sp_dispatch_puts(sp_RbValue v) {
-    switch (v.tag) {
-        case SP_T_INT:    printf("%lld\n", (long long)v.i); break;
-        case SP_T_FLOAT:  { char buf[32]; snprintf(buf,32,"%g",v.f);
-                            printf("%s%s\n", buf, strchr(buf,'.')||strchr(buf,'e') ? "" : ".0"); break; }
-        case SP_T_STRING: { fputs(v.s, stdout); if (!*v.s || v.s[strlen(v.s)-1]!='\n') putchar('\n'); break; }
-        case SP_T_BOOL:   puts(v.i ? "true" : "false"); break;
-        case SP_T_NIL:    puts(""); break;
-        default:          puts("(object)"); break;
-    }
-    return sp_box_nil();
-}
-```
-
-### 型推論の拡張
-
-```
-現在: 変数に1つの型を割り当て (MONO)
-      Integer + Float → Float (暗黙変換)
-      Integer + String → VALUE (フォールバック — 実質エラー)
-
-拡張: Union型を追跡 (POLY)
-      Integer + Float → Float (変換可能なら維持)
-      Integer + String → POLY{Integer, String} (boxing)
-      Duck + Person → POLY{Duck, Person} (bimorphic dispatch)
-      Duck + Person + Robot → POLY{Duck, Person, Robot} (megamorphic dispatch)
-```
-
-### 実装ロードマップ
+### 実装ロードマップ (全完了)
 
 | Phase | 内容 | 状態 |
 |-------|------|------|
-| **1a** | sp_RbValue型定義 + boxing/unboxing関数 | ✅ 完了 |
-| **1b** | sp_RbValue上の基本演算 (puts, nil?等) | ✅ 完了 |
-| **1c** | SPINEL_TYPE_POLY + Union型追跡 | ✅ 完了 |
-| **1d** | bimorphic call-site switch生成 | ✅ 完了 |
-| **2a** | 異種配列 `[1, "two", 3.0]` → sp_RbArray | ✅ 完了 |
-| **2b** | bimorphicダックタイピング (クラスタグ) | ✅ 完了 |
-| **2c** | 異種Hash `{a: 1, b: "str"}` → sp_RbHash | ✅ 完了 |
-| **3** | パターンマッチ `case/in` (型チェック分岐) | ✅ 完了 |
-| **4** | megamorphic dispatch関数生成 (3型以上) | ✅ 完了 |
-| **5** | sp_String (ミュータブル文字列 + GC) | ✅ 完了 |
-| **5b** | sp_String Phase 2-4 (replace, clear, [], gsub等) | ✅ 完了 |
-| **6** | require_relative (複数ファイルコンパイル) | ✅ 完了 |
-| **7** | NaN-boxing (8バイト化, favor pointer) | ✅ 完了 |
-
-### 設計原則
-
-1. **段階的導入**: 既存の単相コンパイルを壊さない。POLYは必要な変数にのみ適用
-2. **3段階最適化**: mono→直接, bi→inline switch, mega→dispatch関数
-3. **性能優先**: 単相パスは現在の速度 (20-57× vs CRuby) を維持
-4. **互換性**: 最終的に全valid Rubyをコンパイル可能に
-
----
-
-## NaN-boxing設計 (Phase 7)
-
-### 方式: Favor Pointer (JSC方式)
-
-POLYコードではオブジェクト/Integer/Stringが主、Floatは多くの場合MONO。
-ポインタとIntegerの抽出を最速にする設計。
-
-```
-typedef uint64_t sp_RbValue;  // 16B struct → 8B integer
-
-64ビットレイアウト:
-  ポインタ:  0x0000_XXXX_XXXX_XXX0  (下位48ビット、アライン済み)
-             抽出: (void *)v             コスト: ゼロ
-             判定: v < DOUBLE_OFFSET     コスト: 比較1回
-
-  Integer:   0x0001_XXXX_XXXX_XXXX  (上位16ビット=0x0001, 下位48ビット=値)
-             抽出: (int64_t)(v << 16) >> 16   符号拡張
-             判定: (v >> 48) == 0x0001   コスト: シフト+比較
-             範囲: ±140兆 (48ビット)。BigIntは将来対応。
-
-  Double:    元のdoubleビット + DOUBLE_OFFSET (2^49)
-             抽出: bit_cast<double>(v - DOUBLE_OFFSET)  コスト: 減算1回
-             判定: v >= DOUBLE_OFFSET    コスト: 比較1回
-
-  Bool:      0x0002_0000_0000_0001 (true), 0x0002_0000_0000_0000 (false)
-  Nil:       0x0003_0000_0000_0000
-  クラスタグ: 0x0004_CCCC_PPPP_PPPP  (C=class_id, P=pointer)
-```
-
-### 変更範囲
-
-sp_box_*/sp_unbox_*/タグ判定の関数のみ。codegen側は`sp_RbValue`型名のまま。
-
-```c
-// Before (16B struct):
-typedef struct { enum sp_tag tag; union { int64_t i; double f; void *p; }; } sp_RbValue;
-sp_RbValue sp_box_int(int64_t n) { return (sp_RbValue){SP_T_INT, .i = n}; }
-if (v.tag == SP_T_INT) ...
-
-// After (8B NaN-boxed):
-typedef uint64_t sp_RbValue;
-#define SP_NANBOX_INT_TAG  ((uint64_t)0x0001 << 48)
-#define SP_NANBOX_DBL_OFFSET ((uint64_t)1 << 49)
-sp_RbValue sp_box_int(int64_t n) { return SP_NANBOX_INT_TAG | (n & 0xFFFFFFFFFFFF); }
-if ((v >> 48) == 0x0001) ...
-```
-
-### sp_RbValue完了により解放された機能
-- ✅ 多相変数 (x = 1; x = "hello")
-- ✅ 異種配列 [1, "two", 3.0]
-- ✅ bimorphicダックタイピング (2クラス)
-- ✅ nilable変数
-
-### 完了した3ステップ
-- ✅ 異種Hash (sp_RbHash)
-- ✅ POLY算術 (sp_poly_add/sub/mul/div/gt/lt/eq)
-- ✅ Megamorphic dispatch (3型以上 → dispatch関数)
-
----
-
-## sp_String設計
-
-### 方針: 段階的導入
-
-MONO文字列は`const char *`のまま。POLY/GC必要な場面のみsp_Stringを使用。
-
-```
-MONO文字列 (型確定)    → const char * (現行通り、変更なし)
-POLY/GC文字列          → sp_String * (新規、GC管理)
-リテラル "hello"       → const char * (変換は必要時のみ)
-```
-
-### sp_String構造体
-
-```c
-typedef struct {
-    char *data;       // ヒープ割り当てバッファ (NUL終端)
-    int64_t len;      // バイト長
-    int64_t cap;      // バッファ容量
-} sp_String;          // ポインタ型 (GCヒープ上)
-```
-
-- エンコーディング: UTF-8固定 (フィールド不要)
-- COW: なし (初期段階)
-- GC: sp_gc_alloc + ファイナライザでdata解放
-
-### 操作
-
-```c
-sp_String *sp_String_new(const char *s);        // const char * → sp_String
-const char *sp_String_cstr(sp_String *s);       // sp_String → const char * (読み出し)
-sp_String *sp_String_concat(sp_String *a, sp_String *b);
-sp_String *sp_String_from_cstr(const char *s);  // コピー作成
-void sp_String_append(sp_String *s, const char *t);  // ミュータブル追加
-int64_t sp_String_length(sp_String *s);
-```
-
-### MONO↔sp_String境界
-
-```c
-// const char * → sp_String (MONO→POLY境界で変換)
-sp_String *sp_String_from_cstr("hello");
-
-// sp_String → const char * (puts等のstdio境界で変換)
-fputs(sp_String_cstr(s), stdout);
-```
-
-### 実装ステップ
-
-| # | 内容 |
-|---|------|
-| 1 | sp_String構造体 + new/cstr/concat/length + GC統合 |
-| 2 | SPINEL_TYPE_MUTABLE_STRING + 型推論 (<<, replace等で昇格) |
-| 3 | String#<< のミュータブル実装 (現在は再代入で代用) |
-| 4 | 既存メソッドのsp_String対応版 (upcase, downcase等) |
+| **1** | sp_RbValue型定義 + boxing/unboxing + 基本演算 | ✅ |
+| **2** | 異種配列 + bimorphicダックタイピング + 異種Hash | ✅ |
+| **3** | パターンマッチ `case/in` | ✅ |
+| **4** | megamorphic dispatch関数生成 | ✅ |
+| **5** | sp_String (ミュータブル文字列 + GC) | ✅ |
+| **6** | require_relative (複数ファイルコンパイル) | ✅ |
+| **7** | NaN-boxing (8バイト化, favor pointer) | ✅ |
 
 ---
 
@@ -506,14 +291,18 @@ fputs(sp_String_cstr(s), stdout);
 ```
 spinel/
 ├── src/
-│   ├── main.c          # CLI、ファイル読み込み、Prismパース
-│   ├── codegen.h       # 型システム、クラス/メソッド/モジュール情報構造体
-│   └── codegen.c       # 多パスコード生成器 (~10500行)
-├── examples/           # 47テストプログラム
+│   ├── main.c        # CLI、ファイル読み込み、Prismパース
+│   ├── codegen.h     # 型システム、構造体定義、共有関数宣言
+│   ├── codegen.c     # オーケストレータ、ユーティリティ、クラス解析、ラムダ、require
+│   ├── type.c        # 型推論、型解決
+│   ├── expr.c        # 式コード生成
+│   ├── stmt.c        # 文コード生成
+│   └── emit.c        # Cコード出力 (ヘッダ、構造体、メソッド)
+├── examples/         # 54テストプログラム (53自動テスト)
 ├── prototype/
-│   └── tools/          # Step 0プロトタイプ (RBS抽出、LumiTrace等)
+│   └── tools/        # Step 0プロトタイプ (RBS抽出、LumiTrace等)
 ├── Makefile
-├── PLAN.md             # 本文書
+├── PLAN.md           # 本文書
 └── ruby_aot_compiler_design.md  # 詳細設計文書
 ```
 
@@ -523,6 +312,7 @@ spinel/
 make deps && make         # コンパイラビルド
 ./spinel --source=app.rb --output=app.c
 cc -O2 app.c -lm -o app  # Regexp使用時は -lonig 追加
+make test-all             # 53テスト実行
 ```
 
 ## 参考情報
