@@ -449,8 +449,8 @@ void codegen_stmt(codegen_ctx_t *ctx, pm_node_t *node) {
     case PM_CALL_NODE: {
         pm_call_node_t *call = (pm_call_node_t *)node;
 
-        /* require_relative is a compile-time directive — skip at codegen */
-        if (is_require_relative(ctx, node))
+        /* require/require_relative are compile-time directives — skip at codegen */
+        if (is_require_relative(ctx, node) || is_require(ctx, node))
             break;
 
         /* private/protected/public — access modifiers are no-ops in AOT */

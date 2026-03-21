@@ -11,10 +11,11 @@
 #include "codegen.h"
 
 static void usage(const char *prog) {
-    fprintf(stderr, "Usage: %s --source=FILE --output=FILE\n", prog);
+    fprintf(stderr, "Usage: %s --source=FILE --output=FILE [--lib=DIR...]\n", prog);
     fprintf(stderr, "\nOptions:\n");
     fprintf(stderr, "  --source=FILE   Ruby source file to compile\n");
     fprintf(stderr, "  --output=FILE   Output C file (default: stdout)\n");
+    fprintf(stderr, "  --lib=DIR       Library search path for require (repeatable)\n");
 }
 
 static char *read_file(const char *path, size_t *length) {
@@ -43,12 +44,17 @@ static char *read_file(const char *path, size_t *length) {
 int main(int argc, char **argv) {
     const char *source_path = NULL;
     const char *output_path = NULL;
+    const char *lib_paths[16];
+    int lib_path_count = 0;
 
     for (int i = 1; i < argc; i++) {
         if (strncmp(argv[i], "--source=", 9) == 0) {
             source_path = argv[i] + 9;
         } else if (strncmp(argv[i], "--output=", 9) == 0) {
             output_path = argv[i] + 9;
+        } else if (strncmp(argv[i], "--lib=", 6) == 0) {
+            if (lib_path_count < 16)
+                lib_paths[lib_path_count++] = argv[i] + 6;
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             usage(argv[0]);
             return 0;
@@ -107,6 +113,8 @@ int main(int argc, char **argv) {
     /* Generate C code */
     codegen_ctx_t *ctx = (codegen_ctx_t *)calloc(1, sizeof(codegen_ctx_t));
     codegen_init(ctx, &parser, out, source_path);
+    for (int i = 0; i < lib_path_count; i++)
+        ctx->lib_paths[ctx->lib_path_count++] = lib_paths[i];
     codegen_program(ctx, root);
 
     /* Cleanup required files */
@@ -114,6 +122,7 @@ int main(int argc, char **argv) {
         pm_node_destroy(&ctx->required_files[i].parser, ctx->required_files[i].root);
         pm_parser_free(&ctx->required_files[i].parser);
         free(ctx->required_files[i].source);
+        free(ctx->required_files[i].path);
     }
     free(ctx);
 

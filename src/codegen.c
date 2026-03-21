@@ -664,16 +664,34 @@ static void analyze_class(codegen_ctx_t *ctx, pm_class_node_t *node) {
 }
 
 static void analyze_module(codegen_ctx_t *ctx, pm_module_node_t *node) {
-    module_info_t *mod = &ctx->modules[ctx->module_count++];
-    memset(mod, 0, sizeof(*mod));
-    mod->module_node = (pm_node_t *)node;
-
+    /* Extract module name first for dedup check */
+    char mod_name[64] = "";
     if (PM_NODE_TYPE(node->constant_path) == PM_CONSTANT_READ_NODE) {
         pm_constant_read_node_t *cr = (pm_constant_read_node_t *)node->constant_path;
         char *name = cstr(ctx, cr->name);
-        snprintf(mod->name, sizeof(mod->name), "%s", name);
+        snprintf(mod_name, sizeof(mod_name), "%s", name);
         free(name);
     }
+
+    /* Check if module already exists (e.g., "module Lrama" repeated across files) */
+    module_info_t *mod = NULL;
+    for (int i = 0; i < ctx->module_count; i++) {
+        if (mod_name[0] && strcmp(ctx->modules[i].name, mod_name) == 0) {
+            mod = &ctx->modules[i];
+            break;
+        }
+    }
+    if (!mod) {
+        if (ctx->module_count >= MAX_MODULES) {
+            fprintf(stderr, "Warning: too many modules (max %d), skipping '%s'\n",
+                    MAX_MODULES, mod_name);
+            return;
+        }
+        mod = &ctx->modules[ctx->module_count++];
+        memset(mod, 0, sizeof(*mod));
+        snprintf(mod->name, sizeof(mod->name), "%s", mod_name);
+    }
+    mod->module_node = (pm_node_t *)node;
 
     /* Analyze module body for methods and class ivars */
     if (!node->body) return;
@@ -1051,7 +1069,133 @@ bool is_require_relative(codegen_ctx_t *ctx, pm_node_t *node) {
     return true;
 }
 
-/* Process require_relative calls: parse required files and run analysis passes */
+/* Check if a node is a require "name" call */
+bool is_require(codegen_ctx_t *ctx, pm_node_t *node) {
+    if (PM_NODE_TYPE(node) != PM_CALL_NODE) return false;
+    pm_call_node_t *call = (pm_call_node_t *)node;
+    if (call->receiver) return false;
+    if (!ceq(ctx, call->name, "require")) return false;
+    if (!call->arguments || call->arguments->arguments.size != 1) return false;
+    if (PM_NODE_TYPE(call->arguments->arguments.nodes[0]) != PM_STRING_NODE) return false;
+    return true;
+}
+
+/* Try to resolve require "name" via lib search paths.
+ * Returns allocated full path string or NULL. */
+static char *resolve_require(codegen_ctx_t *ctx, const char *name) {
+    for (int i = 0; i < ctx->lib_path_count; i++) {
+        char path[PATH_MAX];
+        size_t nl = strlen(name);
+        if (nl >= 3 && strcmp(name + nl - 3, ".rb") == 0)
+            snprintf(path, sizeof(path), "%s/%s", ctx->lib_paths[i], name);
+        else
+            snprintf(path, sizeof(path), "%s/%s.rb", ctx->lib_paths[i], name);
+        FILE *f = fopen(path, "r");
+        if (f) {
+            fclose(f);
+            char *result = malloc(strlen(path) + 1);
+            strcpy(result, path);
+            return result;
+        }
+    }
+    return NULL;
+}
+
+/* Process a single file: parse, check errors, run class_analysis_pass.
+ * Returns index in required_files or -1 on failure. */
+static int process_one_require(codegen_ctx_t *ctx, const char *full_path) {
+    /* Deduplicate: skip if already required */
+    char real[PATH_MAX];
+    const char *canon = realpath(full_path, real) ? real : full_path;
+    for (int i = 0; i < ctx->required_file_count; i++) {
+        if (strcmp(ctx->required_files[i].path, canon) == 0)
+            return i; /* already loaded */
+    }
+
+    size_t req_len;
+    char *req_source = read_source_file(full_path, &req_len);
+    if (!req_source) return -1;
+
+    if (ctx->required_file_count >= MAX_REQUIRED_FILES) {
+        fprintf(stderr, "Warning: too many required files (max %d)\n", MAX_REQUIRED_FILES);
+        free(req_source);
+        return -1;
+    }
+
+    int idx = ctx->required_file_count++;
+    ctx->required_files[idx].source = req_source;
+    ctx->required_files[idx].path = xstrdup(canon);
+    pm_parser_init(&ctx->required_files[idx].parser,
+                   (const uint8_t *)req_source, req_len, NULL);
+    ctx->required_files[idx].root = pm_parse(&ctx->required_files[idx].parser);
+
+    if (ctx->required_files[idx].parser.error_list.size > 0) {
+        fprintf(stderr, "Parse errors in '%s'\n", full_path);
+        ctx->required_file_count--;
+        pm_node_destroy(&ctx->required_files[idx].parser, ctx->required_files[idx].root);
+        pm_parser_free(&ctx->required_files[idx].parser);
+        free(req_source);
+        return -1;
+    }
+
+    pm_parser_t *saved_parser = ctx->parser;
+    const char *saved_source = ctx->source_path;
+    ctx->parser = &ctx->required_files[idx].parser;
+    ctx->source_path = full_path;
+
+    /* Recursively process require/require_relative in the required file */
+    pm_node_t *rroot = ctx->required_files[idx].root;
+    if (PM_NODE_TYPE(rroot) == PM_PROGRAM_NODE) {
+        pm_program_node_t *rprog = (pm_program_node_t *)rroot;
+        if (rprog->statements) {
+            for (size_t j = 0; j < rprog->statements->body.size; j++) {
+                pm_node_t *rs = rprog->statements->body.nodes[j];
+                if (is_require_relative(ctx, rs)) {
+                    pm_call_node_t *rcall = (pm_call_node_t *)rs;
+                    pm_string_node_t *rpath_node = (pm_string_node_t *)rcall->arguments->arguments.nodes[0];
+                    const uint8_t *rrel_src = pm_string_source(&rpath_node->unescaped);
+                    size_t rrel_len = pm_string_length(&rpath_node->unescaped);
+                    char rrel_path[PATH_MAX];
+                    snprintf(rrel_path, sizeof(rrel_path), "%.*s", (int)rrel_len, rrel_src);
+
+                    char rdir_buf[PATH_MAX];
+                    snprintf(rdir_buf, sizeof(rdir_buf), "%s", full_path);
+                    char *rdir = dirname(rdir_buf);
+                    char rfull[PATH_MAX];
+                    size_t rrpl = strlen(rrel_path);
+                    if (rrpl >= 3 && strcmp(rrel_path + rrpl - 3, ".rb") == 0)
+                        snprintf(rfull, sizeof(rfull), "%s/%s", rdir, rrel_path);
+                    else
+                        snprintf(rfull, sizeof(rfull), "%s/%s.rb", rdir, rrel_path);
+                    process_one_require(ctx, rfull);
+                } else if (is_require(ctx, rs)) {
+                    pm_call_node_t *rcall = (pm_call_node_t *)rs;
+                    pm_string_node_t *rpath_node = (pm_string_node_t *)rcall->arguments->arguments.nodes[0];
+                    const uint8_t *rname_src = pm_string_source(&rpath_node->unescaped);
+                    size_t rname_len = pm_string_length(&rpath_node->unescaped);
+                    char rname[256];
+                    snprintf(rname, sizeof(rname), "%.*s", (int)rname_len, rname_src);
+                    char *resolved = resolve_require(ctx, rname);
+                    if (resolved) {
+                        process_one_require(ctx, resolved);
+                        free(resolved);
+                    } else {
+                        fprintf(stderr, "spinel: warning: unsupported call Kernel#require (%s)\n", rname);
+                    }
+                }
+            }
+        }
+    }
+
+    /* Run class analysis */
+    class_analysis_pass(ctx, ctx->required_files[idx].root);
+
+    ctx->parser = saved_parser;
+    ctx->source_path = saved_source;
+    return idx;
+}
+
+/* Process require_relative and require calls at top level */
 static void process_require_relative(codegen_ctx_t *ctx, pm_node_t *root) {
     assert(PM_NODE_TYPE(root) == PM_PROGRAM_NODE);
     pm_program_node_t *prog = (pm_program_node_t *)root;
@@ -1060,72 +1204,49 @@ static void process_require_relative(codegen_ctx_t *ctx, pm_node_t *root) {
 
     for (size_t i = 0; i < stmts->body.size; i++) {
         pm_node_t *s = stmts->body.nodes[i];
-        if (!is_require_relative(ctx, s)) continue;
 
-        pm_call_node_t *call = (pm_call_node_t *)s;
-        pm_string_node_t *path_node =
-            (pm_string_node_t *)call->arguments->arguments.nodes[0];
-        const uint8_t *rel_src = pm_string_source(&path_node->unescaped);
-        size_t rel_len = pm_string_length(&path_node->unescaped);
+        if (is_require_relative(ctx, s)) {
+            pm_call_node_t *call = (pm_call_node_t *)s;
+            pm_string_node_t *path_node =
+                (pm_string_node_t *)call->arguments->arguments.nodes[0];
+            const uint8_t *rel_src = pm_string_source(&path_node->unescaped);
+            size_t rel_len = pm_string_length(&path_node->unescaped);
 
-        /* Build relative path string */
-        char rel_path[PATH_MAX];
-        snprintf(rel_path, sizeof(rel_path), "%.*s", (int)rel_len, rel_src);
+            char rel_path[PATH_MAX];
+            snprintf(rel_path, sizeof(rel_path), "%.*s", (int)rel_len, rel_src);
 
-        /* Resolve full path relative to source file directory */
-        char dir_buf[PATH_MAX];
-        snprintf(dir_buf, sizeof(dir_buf), "%s", ctx->source_path);
-        char *dir = dirname(dir_buf);
+            char dir_buf[PATH_MAX];
+            snprintf(dir_buf, sizeof(dir_buf), "%s", ctx->source_path);
+            char *dir = dirname(dir_buf);
 
-        char full_path[PATH_MAX];
-        /* Append .rb if not already present */
-        size_t rpl = strlen(rel_path);
-        if (rpl >= 3 && strcmp(rel_path + rpl - 3, ".rb") == 0)
-            snprintf(full_path, sizeof(full_path), "%s/%s", dir, rel_path);
-        else
-            snprintf(full_path, sizeof(full_path), "%s/%s.rb", dir, rel_path);
+            char full_path[PATH_MAX];
+            size_t rpl = strlen(rel_path);
+            if (rpl >= 3 && strcmp(rel_path + rpl - 3, ".rb") == 0)
+                snprintf(full_path, sizeof(full_path), "%s/%s", dir, rel_path);
+            else
+                snprintf(full_path, sizeof(full_path), "%s/%s.rb", dir, rel_path);
 
-        /* Read and parse the required file */
-        size_t req_len;
-        char *req_source = read_source_file(full_path, &req_len);
-        if (!req_source) {
-            fprintf(stderr, "Warning: cannot open require_relative '%s' (%s)\n",
-                    rel_path, full_path);
-            continue;
+            if (process_one_require(ctx, full_path) < 0) {
+                fprintf(stderr, "Warning: cannot open require_relative '%s' (%s)\n",
+                        rel_path, full_path);
+            }
+        } else if (is_require(ctx, s)) {
+            pm_call_node_t *call = (pm_call_node_t *)s;
+            pm_string_node_t *path_node =
+                (pm_string_node_t *)call->arguments->arguments.nodes[0];
+            const uint8_t *rel_src = pm_string_source(&path_node->unescaped);
+            size_t rel_len = pm_string_length(&path_node->unescaped);
+
+            char name[256];
+            snprintf(name, sizeof(name), "%.*s", (int)rel_len, rel_src);
+
+            char *resolved = resolve_require(ctx, name);
+            if (resolved) {
+                process_one_require(ctx, resolved);
+                free(resolved);
+            }
+            /* If not resolved, silently skip (the require call becomes a no-op) */
         }
-
-        if (ctx->required_file_count >= MAX_REQUIRED_FILES) {
-            fprintf(stderr, "Warning: too many require_relative files (max %d)\n",
-                    MAX_REQUIRED_FILES);
-            free(req_source);
-            continue;
-        }
-
-        int idx = ctx->required_file_count++;
-        ctx->required_files[idx].source = req_source;
-        pm_parser_init(&ctx->required_files[idx].parser,
-                       (const uint8_t *)req_source, req_len, NULL);
-        ctx->required_files[idx].root =
-            pm_parse(&ctx->required_files[idx].parser);
-
-        /* Check for parse errors */
-        if (ctx->required_files[idx].parser.error_list.size > 0) {
-            fprintf(stderr, "Parse errors in '%s'\n", full_path);
-            ctx->required_file_count--;
-            pm_node_destroy(&ctx->required_files[idx].parser,
-                            ctx->required_files[idx].root);
-            pm_parser_free(&ctx->required_files[idx].parser);
-            free(req_source);
-            continue;
-        }
-
-        /* Run class analysis on the required file (registers classes/modules/funcs).
-         * We temporarily swap the parser so cstr/ceq use the required file's
-         * constant pool. */
-        pm_parser_t *saved_parser = ctx->parser;
-        ctx->parser = &ctx->required_files[idx].parser;
-        class_analysis_pass(ctx, ctx->required_files[idx].root);
-        ctx->parser = saved_parser;
     }
 }
 

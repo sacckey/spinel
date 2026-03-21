@@ -11,6 +11,7 @@
 
 #include <stdio.h>
 #include <stdbool.h>
+#include <limits.h>
 #include <prism.h>
 
 /* Inferred type for an expression or variable */
@@ -263,12 +264,18 @@ typedef struct {
     /* Source file path (for resolving require_relative) */
     const char *source_path;
 
+    /* Library search paths (for resolving require "name") */
+    #define MAX_LIB_PATHS 16
+    const char *lib_paths[MAX_LIB_PATHS];
+    int lib_path_count;
+
     /* Required files (kept alive for AST references in method_info_t) */
     #define MAX_REQUIRED_FILES 80
     struct {
         pm_parser_t parser;
         pm_node_t *root;
         char *source;
+        char *path; /* resolved path for deduplication (heap-allocated) */
     } required_files[MAX_REQUIRED_FILES];
     int required_file_count;
 } codegen_ctx_t;
@@ -361,5 +368,6 @@ char *codegen_lambda(codegen_ctx_t *ctx, pm_lambda_node_t *lam);
 
 /* --- Require handling (codegen.c) --- */
 bool is_require_relative(codegen_ctx_t *ctx, pm_node_t *node);
+bool is_require(codegen_ctx_t *ctx, pm_node_t *node);
 
 #endif /* SPINEL_CODEGEN_H */

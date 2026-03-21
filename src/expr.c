@@ -242,8 +242,8 @@ char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
     case PM_CALL_NODE: {
         pm_call_node_t *call = (pm_call_node_t *)node;
 
-        /* require_relative is a compile-time directive — skip */
-        if (is_require_relative(ctx, node))
+        /* require/require_relative are compile-time directives — skip */
+        if (is_require_relative(ctx, node) || is_require(ctx, node))
             return xstrdup("0");
 
         char *method = cstr(ctx, call->name);
