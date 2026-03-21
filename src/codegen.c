@@ -318,6 +318,7 @@ const char *sanitize_method(const char *name) {
         memcpy(buf, name, len + 1);
         if (buf[len - 1] == '?') { buf[len - 1] = '_'; buf[len] = 'p'; buf[len + 1] = '\0'; }
         else if (buf[len - 1] == '!') { buf[len - 1] = '_'; buf[len] = 'b'; buf[len + 1] = '\0'; }
+        else if (buf[len - 1] == '=') { buf[len - 1] = '_'; buf[len] = 's'; buf[len + 1] = '\0'; } /* setter */
         return buf;
     }
     return name;
