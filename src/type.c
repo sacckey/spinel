@@ -68,6 +68,7 @@ const char *spinel_type_cname(spinel_type_t k) {
     case SPINEL_TYPE_BOOLEAN: return "mrb_bool";
     case SPINEL_TYPE_STRING:  return "const char *";
     case SPINEL_TYPE_ARRAY:   return "sp_IntArray *";
+    case SPINEL_TYPE_FLOAT_ARRAY: return "sp_FloatArray *";
     case SPINEL_TYPE_HASH:    return "sp_StrIntHash *";
     case SPINEL_TYPE_PROC:    return "sp_Val *";
     case SPINEL_TYPE_POLY:    return "sp_RbValue";
@@ -108,6 +109,7 @@ char *vt_ctype(codegen_ctx_t *ctx, vtype_t t, bool as_ptr) {
 /* Return true if a variable of this type needs GC rooting */
 bool is_gc_type(codegen_ctx_t *ctx, vtype_t t) {
     if (t.kind == SPINEL_TYPE_ARRAY) return true;
+    if (t.kind == SPINEL_TYPE_FLOAT_ARRAY) return true;
     if (t.kind == SPINEL_TYPE_HASH) return true;
     if (t.kind == SPINEL_TYPE_OBJECT) {
         class_info_t *cls = find_class(ctx, t.klass);
@@ -340,6 +342,14 @@ vtype_t infer_type(codegen_ctx_t *ctx, pm_node_t *node) {
             pm_constant_read_node_t *cr = (pm_constant_read_node_t *)call->receiver;
             char *cls_name = cstr(ctx, cr->name);
             if (strcmp(cls_name, "Array") == 0) {
+                /* Array.new(n, val): if val is Float, use FloatArray */
+                if (call->arguments && call->arguments->arguments.size == 2) {
+                    vtype_t vt = infer_type(ctx, call->arguments->arguments.nodes[1]);
+                    if (vt.kind == SPINEL_TYPE_FLOAT) {
+                        free(cls_name); free(method);
+                        return vt_prim(SPINEL_TYPE_FLOAT_ARRAY);
+                    }
+                }
                 free(cls_name); free(method);
                 return vt_prim(SPINEL_TYPE_ARRAY);
             }
@@ -447,6 +457,12 @@ vtype_t infer_type(codegen_ctx_t *ctx, pm_node_t *node) {
                     strcmp(method, "max_by") == 0) { free(method); return vt_prim(SPINEL_TYPE_INTEGER); }
                 if (strcmp(method, "sort_by") == 0) { free(method); return vt_prim(SPINEL_TYPE_ARRAY); }
                 if (strcmp(method, "zip") == 0) { free(method); return vt_prim(SPINEL_TYPE_RB_ARRAY); }
+            }
+            /* sp_FloatArray methods */
+            if (recv_t.kind == SPINEL_TYPE_FLOAT_ARRAY) {
+                if (strcmp(method, "[]") == 0) { free(method); return vt_prim(SPINEL_TYPE_FLOAT); }
+                if (strcmp(method, "length") == 0 || strcmp(method, "size") == 0) { free(method); return vt_prim(SPINEL_TYPE_INTEGER); }
+                if (strcmp(method, "dup") == 0) { free(method); return vt_prim(SPINEL_TYPE_FLOAT_ARRAY); }
             }
             /* sp_RbArray methods */
             if (recv_t.kind == SPINEL_TYPE_RB_ARRAY) {
@@ -624,6 +640,14 @@ vtype_t infer_type(codegen_ctx_t *ctx, pm_node_t *node) {
                 pm_constant_read_node_t *cr = (pm_constant_read_node_t *)call->receiver;
                 char *cls_name = cstr(ctx, cr->name);
                 if (strcmp(cls_name, "Array") == 0) {
+                    /* Array.new(n, val): if val is Float, use FloatArray */
+                    if (call->arguments && call->arguments->arguments.size == 2) {
+                        vtype_t vt = infer_type(ctx, call->arguments->arguments.nodes[1]);
+                        if (vt.kind == SPINEL_TYPE_FLOAT) {
+                            free(cls_name); free(method);
+                            return vt_prim(SPINEL_TYPE_FLOAT_ARRAY);
+                        }
+                    }
                     free(cls_name); free(method);
                     return vt_prim(SPINEL_TYPE_ARRAY);
                 }
@@ -956,13 +980,15 @@ vtype_t infer_type(codegen_ctx_t *ctx, pm_node_t *node) {
         pm_array_node_t *ary_node = (pm_array_node_t *)node;
         if (ary_node->elements.size == 0)
             return vt_prim(SPINEL_TYPE_ARRAY); /* empty [] → IntArray */
-        bool all_int = true, all_str = true;
+        bool all_int = true, all_str = true, all_float = true;
         for (size_t i = 0; i < ary_node->elements.size; i++) {
             vtype_t et = infer_type(ctx, ary_node->elements.nodes[i]);
             if (et.kind != SPINEL_TYPE_INTEGER) all_int = false;
             if (et.kind != SPINEL_TYPE_STRING) all_str = false;
+            if (et.kind != SPINEL_TYPE_FLOAT) all_float = false;
         }
         if (all_int) return vt_prim(SPINEL_TYPE_ARRAY);
+        if (all_float) return vt_prim(SPINEL_TYPE_FLOAT_ARRAY);
         if (all_str) return vt_prim(SPINEL_TYPE_STR_ARRAY);
         return vt_prim(SPINEL_TYPE_RB_ARRAY);
     }
@@ -1130,8 +1156,9 @@ void infer_pass(codegen_ctx_t *ctx, pm_node_t *node) {
                         v->is_array = true;
                         v->array_size = arr_size;
                     } else {
-                        /* Dynamic sp_IntArray (e.g., Array.new with no args) */
-                        type = vt_prim(SPINEL_TYPE_ARRAY);
+                        /* Dynamic array (IntArray or FloatArray based on infer_type) */
+                        if (type.kind != SPINEL_TYPE_FLOAT_ARRAY)
+                            type = vt_prim(SPINEL_TYPE_ARRAY);
                         var_declare(ctx, name, type, false);
                     }
                     free(mname); free(name);
@@ -2218,6 +2245,7 @@ void resolve_class_types(codegen_ctx_t *ctx, pm_node_t *prog_root) {
             if (f->param_count > 0 &&
                 f->params[0].type.kind != SPINEL_TYPE_VALUE &&
                 f->params[0].type.kind != SPINEL_TYPE_ARRAY &&
+                f->params[0].type.kind != SPINEL_TYPE_FLOAT_ARRAY &&
                 f->params[0].type.kind != SPINEL_TYPE_OBJECT &&
                 f->params[0].type.kind != SPINEL_TYPE_POLY) {
                 f->return_type = f->params[0].type;

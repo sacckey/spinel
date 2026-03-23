@@ -404,6 +404,13 @@ void emit_method(codegen_ctx_t *ctx, class_info_t *cls, method_info_t *m) {
             free(ct); free(cn);
             continue;
         }
+        else if (v->type.kind == SPINEL_TYPE_FLOAT_ARRAY) {
+            emit(ctx, "sp_FloatArray *%s = NULL;\n", cn);
+            if (method_has_gc_vars)
+                emit(ctx, "SP_GC_ROOT(%s);\n", cn);
+            free(ct); free(cn);
+            continue;
+        }
         else if (v->type.kind == SPINEL_TYPE_HASH) {
             emit(ctx, "sp_StrIntHash *%s = NULL;\n", cn);
             if (method_has_gc_vars)
@@ -550,6 +557,13 @@ void emit_top_func(codegen_ctx_t *ctx, func_info_t *f) {
             char *cn = make_cname(v->name, v->is_constant);
             if (v->type.kind == SPINEL_TYPE_ARRAY) {
                 emit(ctx, "sp_IntArray *%s = NULL;\n", cn);
+                if (func_has_gc_vars)
+                    emit(ctx, "SP_GC_ROOT(%s);\n", cn);
+                free(ct); free(cn);
+                continue;
+            }
+            if (v->type.kind == SPINEL_TYPE_FLOAT_ARRAY) {
+                emit(ctx, "sp_FloatArray *%s = NULL;\n", cn);
                 if (func_has_gc_vars)
                     emit(ctx, "SP_GC_ROOT(%s);\n", cn);
                 free(ct); free(cn);
@@ -1852,6 +1866,56 @@ void emit_header(codegen_ctx_t *ctx) {
     emit_raw(ctx, "    a->data[a->start + idx] = val;\n");
     emit_raw(ctx, "    a->len++;\n");
     emit_raw(ctx, "}\n\n");
+
+    /* Built-in sp_FloatArray for float array support */
+    emit_raw(ctx, "/* ---- Built-in float array ---- */\n");
+    emit_raw(ctx, "typedef struct { mrb_float *data; mrb_int start; mrb_int len; mrb_int cap; } sp_FloatArray;\n\n");
+
+    if (ctx->needs_gc) {
+        emit_raw(ctx, "static void sp_FloatArray_finalize(void *p) {\n");
+        emit_raw(ctx, "    sp_FloatArray *a = (sp_FloatArray *)p;\n");
+        emit_raw(ctx, "    free(a->data);\n");
+        emit_raw(ctx, "}\n\n");
+
+        emit_raw(ctx, "static sp_FloatArray *sp_FloatArray_new(void) {\n");
+        emit_raw(ctx, "    sp_FloatArray *a = (sp_FloatArray *)sp_gc_alloc(sizeof(sp_FloatArray), sp_FloatArray_finalize, NULL);\n");
+        emit_raw(ctx, "    a->cap = 16; a->data = (mrb_float *)malloc(sizeof(mrb_float) * a->cap);\n");
+        emit_raw(ctx, "    sp_gc_bytes += sizeof(mrb_float) * a->cap;\n");
+        emit_raw(ctx, "    return a;\n}\n\n");
+    } else {
+        emit_raw(ctx, "static sp_FloatArray *sp_FloatArray_new(void) {\n");
+        emit_raw(ctx, "    sp_FloatArray *a = (sp_FloatArray *)calloc(1, sizeof(sp_FloatArray));\n");
+        emit_raw(ctx, "    a->cap = 16; a->data = (mrb_float *)malloc(sizeof(mrb_float) * a->cap);\n");
+        emit_raw(ctx, "    return a;\n}\n\n");
+    }
+
+    emit_raw(ctx, "static sp_FloatArray *sp_FloatArray_dup(sp_FloatArray *a) {\n");
+    emit_raw(ctx, "    sp_FloatArray *b = sp_FloatArray_new();\n");
+    if (ctx->needs_gc)
+        emit_raw(ctx, "    if (a->len > b->cap) { sp_gc_bytes += sizeof(mrb_float) * (a->len - b->cap); b->cap = a->len; b->data = (mrb_float *)realloc(b->data, sizeof(mrb_float) * b->cap); }\n");
+    else
+        emit_raw(ctx, "    if (a->len > b->cap) { b->cap = a->len; b->data = (mrb_float *)realloc(b->data, sizeof(mrb_float) * b->cap); }\n");
+    emit_raw(ctx, "    memcpy(b->data, a->data + a->start, sizeof(mrb_float) * a->len);\n");
+    emit_raw(ctx, "    b->len = a->len; return b;\n}\n\n");
+
+    emit_raw(ctx, "static void sp_FloatArray_push(sp_FloatArray *a, mrb_float val) {\n");
+    emit_raw(ctx, "    mrb_int end = a->start + a->len;\n");
+    emit_raw(ctx, "    if (end >= a->cap) {\n");
+    emit_raw(ctx, "        if (a->start > 0) { memmove(a->data, a->data + a->start, sizeof(mrb_float) * a->len); a->start = 0; end = a->len; }\n");
+    emit_raw(ctx, "        if (end >= a->cap) { a->cap = a->cap * 2 + 1; a->data = (mrb_float *)realloc(a->data, sizeof(mrb_float) * a->cap); }\n");
+    emit_raw(ctx, "    }\n");
+    emit_raw(ctx, "    a->data[end] = val; a->len++;\n}\n\n");
+
+    emit_raw(ctx, "static mrb_float sp_FloatArray_get(sp_FloatArray *a, mrb_int idx) {\n");
+    emit_raw(ctx, "    if (idx < 0) idx += a->len;\n");
+    emit_raw(ctx, "    return a->data[a->start + idx];\n}\n\n");
+
+    emit_raw(ctx, "static void sp_FloatArray_set(sp_FloatArray *a, mrb_int idx, mrb_float val) {\n");
+    emit_raw(ctx, "    if (idx < 0) idx += a->len;\n");
+    emit_raw(ctx, "    if (idx >= 0 && idx < a->len) a->data[a->start + idx] = val;\n}\n\n");
+
+    emit_raw(ctx, "static mrb_int sp_FloatArray_length(sp_FloatArray *a) {\n");
+    emit_raw(ctx, "    return a->len;\n}\n\n");
 
     /* Built-in sp_StrArray for string split support (only when needed) */
     if (ctx->needs_str_split && !ctx->lambda_mode) {

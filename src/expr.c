@@ -912,9 +912,16 @@ char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
                 free(recv); free(arg); free(method);
                 return r;
             }
+            if (recv_t.kind == SPINEL_TYPE_FLOAT_ARRAY) {
+                char *recv = codegen_expr(ctx, call->receiver);
+                char *idx = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+                char *r = sfmt("sp_FloatArray_get(%s, %s)", recv, idx);
+                free(recv); free(idx); free(method);
+                return r;
+            }
             if (recv_t.kind != SPINEL_TYPE_ARRAY && recv_t.kind != SPINEL_TYPE_HASH &&
                 recv_t.kind != SPINEL_TYPE_RB_HASH && recv_t.kind != SPINEL_TYPE_STR_ARRAY &&
-                recv_t.kind != SPINEL_TYPE_RB_ARRAY) {
+                recv_t.kind != SPINEL_TYPE_RB_ARRAY && recv_t.kind != SPINEL_TYPE_FLOAT_ARRAY) {
                 char *recv = codegen_expr(ctx, call->receiver);
                 char *idx = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
                 char *r = sfmt("%s[%s]", recv, idx);
@@ -933,6 +940,15 @@ char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
                 char *idx = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
                 char *val = codegen_expr(ctx, call->arguments->arguments.nodes[1]);
                 char *r = sfmt("sp_IntArray_set(%s, %s, %s)", recv, idx, val);
+                free(recv); free(idx); free(val); free(method);
+                return r;
+            }
+            if (recv_t.kind == SPINEL_TYPE_FLOAT_ARRAY) {
+                /* FloatArray: arr[idx] = val → sp_FloatArray_set */
+                char *recv = codegen_expr(ctx, call->receiver);
+                char *idx = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+                char *val = codegen_expr(ctx, call->arguments->arguments.nodes[1]);
+                char *r = sfmt("sp_FloatArray_set(%s, %s, %s)", recv, idx, val);
                 free(recv); free(idx); free(val); free(method);
                 return r;
             }
@@ -1073,12 +1089,19 @@ char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
                 }
                 if (argc == 2) {
                     /* Array.new(size, default_val) */
+                    vtype_t dv_t = infer_type(ctx, call->arguments->arguments.nodes[1]);
                     char *sz = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
                     char *dv = codegen_expr(ctx, call->arguments->arguments.nodes[1]);
                     int tmp = ctx->temp_counter++;
-                    emit(ctx, "sp_IntArray *_anew_%d = sp_IntArray_new();\n", tmp);
-                    emit(ctx, "for (mrb_int _ai_%d = 0; _ai_%d < %s; _ai_%d++) sp_IntArray_push(_anew_%d, %s);\n",
-                         tmp, tmp, sz, tmp, tmp, dv);
+                    if (dv_t.kind == SPINEL_TYPE_FLOAT) {
+                        emit(ctx, "sp_FloatArray *_anew_%d = sp_FloatArray_new();\n", tmp);
+                        emit(ctx, "for (mrb_int _ai_%d = 0; _ai_%d < %s; _ai_%d++) sp_FloatArray_push(_anew_%d, %s);\n",
+                             tmp, tmp, sz, tmp, tmp, dv);
+                    } else {
+                        emit(ctx, "sp_IntArray *_anew_%d = sp_IntArray_new();\n", tmp);
+                        emit(ctx, "for (mrb_int _ai_%d = 0; _ai_%d < %s; _ai_%d++) sp_IntArray_push(_anew_%d, %s);\n",
+                             tmp, tmp, sz, tmp, tmp, dv);
+                    }
                     free(sz); free(dv); free(cls_name); free(method);
                     return sfmt("_anew_%d", tmp);
                 }
@@ -1984,6 +2007,25 @@ char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
                     return sfmt("_zip_%d", tmp);
                 }
 
+                free(recv);
+            }
+
+            /* sp_FloatArray method calls */
+            if (recv_t.kind == SPINEL_TYPE_FLOAT_ARRAY) {
+                char *recv = codegen_expr(ctx, call->receiver);
+                char *r = NULL;
+                if (strcmp(method, "length") == 0 || strcmp(method, "size") == 0)
+                    r = sfmt("sp_FloatArray_length(%s)", recv);
+                else if (strcmp(method, "dup") == 0)
+                    r = sfmt("sp_FloatArray_dup(%s)", recv);
+                else if (strcmp(method, "push") == 0 && call->arguments &&
+                         call->arguments->arguments.size == 1) {
+                    char *arg = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+                    emit(ctx, "sp_FloatArray_push(%s, %s);\n", recv, arg);
+                    r = sfmt("%s", recv);
+                    free(arg);
+                }
+                if (r) { free(recv); free(method); return r; }
                 free(recv);
             }
 
@@ -4449,6 +4491,18 @@ char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
             for (size_t i = 0; i < ary->elements.size; i++) {
                 char *val = codegen_expr(ctx, ary->elements.nodes[i]);
                 emit(ctx, "sp_IntArray_push(_ary_%d, %s);\n", tmp, val);
+                free(val);
+            }
+            return sfmt("_ary_%d", tmp);
+        }
+
+        /* Homogeneous float array [1.0, 2.0, ...] → sp_FloatArray */
+        if (ary_type.kind == SPINEL_TYPE_FLOAT_ARRAY) {
+            int tmp = ctx->temp_counter++;
+            emit(ctx, "sp_FloatArray *_ary_%d = sp_FloatArray_new();\n", tmp);
+            for (size_t i = 0; i < ary->elements.size; i++) {
+                char *val = codegen_expr(ctx, ary->elements.nodes[i]);
+                emit(ctx, "sp_FloatArray_push(_ary_%d, %s);\n", tmp, val);
                 free(val);
             }
             return sfmt("_ary_%d", tmp);

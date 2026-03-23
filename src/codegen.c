@@ -2632,7 +2632,7 @@ void codegen_program(codegen_ctx_t *ctx, pm_node_t *root) {
             spinel_type_t k = cls->ivars[ii].type.kind;
             if (k == SPINEL_TYPE_SP_STRING) ctx->needs_sp_string = true;
             if (k == SPINEL_TYPE_HASH) ctx->needs_hash = true;
-            if (k == SPINEL_TYPE_ARRAY) ctx->needs_gc = true;
+            if (k == SPINEL_TYPE_ARRAY || k == SPINEL_TYPE_FLOAT_ARRAY) ctx->needs_gc = true;
             if (k == SPINEL_TYPE_RB_ARRAY) { ctx->needs_rb_array = true; ctx->needs_poly = true; }
             if (k == SPINEL_TYPE_RB_HASH) { ctx->needs_rb_hash = true; ctx->needs_poly = true; }
             if (k == SPINEL_TYPE_STR_ARRAY) ctx->needs_str_split = true;
@@ -2692,15 +2692,18 @@ void codegen_program(codegen_ctx_t *ctx, pm_node_t *root) {
     }
     for (int i = 0; i < ctx->var_count && !ctx->needs_gc; i++) {
         if (ctx->vars[i].type.kind == SPINEL_TYPE_ARRAY ||
+            ctx->vars[i].type.kind == SPINEL_TYPE_FLOAT_ARRAY ||
             ctx->vars[i].type.kind == SPINEL_TYPE_HASH)
             ctx->needs_gc = true;
     }
     for (int i = 0; i < ctx->func_count && !ctx->needs_gc; i++) {
         func_info_t *f = &ctx->funcs[i];
         if (f->return_type.kind == SPINEL_TYPE_ARRAY ||
+            f->return_type.kind == SPINEL_TYPE_FLOAT_ARRAY ||
             f->return_type.kind == SPINEL_TYPE_HASH) { ctx->needs_gc = true; break; }
         for (int j = 0; j < f->param_count && !ctx->needs_gc; j++)
             if (f->params[j].type.kind == SPINEL_TYPE_ARRAY ||
+                f->params[j].type.kind == SPINEL_TYPE_FLOAT_ARRAY ||
                 f->params[j].type.kind == SPINEL_TYPE_HASH) ctx->needs_gc = true;
         /* Also infer function body variables to detect array/hash usage */
         if (!ctx->needs_gc && f->body_node) {
@@ -2710,6 +2713,7 @@ void codegen_program(codegen_ctx_t *ctx, pm_node_t *root) {
             infer_pass(ctx, f->body_node);
             for (int j = saved_vc; j < ctx->var_count; j++) {
                 if (ctx->vars[j].type.kind == SPINEL_TYPE_ARRAY ||
+                    ctx->vars[j].type.kind == SPINEL_TYPE_FLOAT_ARRAY ||
                     ctx->vars[j].type.kind == SPINEL_TYPE_HASH) {
                     ctx->needs_gc = true;
                     break;
@@ -2726,6 +2730,7 @@ void codegen_program(codegen_ctx_t *ctx, pm_node_t *root) {
         for (int mi = 0; mi < cls->method_count && !ctx->needs_gc; mi++) {
             method_info_t *m = &cls->methods[mi];
             if (m->return_type.kind == SPINEL_TYPE_ARRAY ||
+                m->return_type.kind == SPINEL_TYPE_FLOAT_ARRAY ||
                 m->return_type.kind == SPINEL_TYPE_HASH) { ctx->needs_gc = true; break; }
             if (m->body_node) {
                 int saved_vc = ctx->var_count;
@@ -2734,6 +2739,7 @@ void codegen_program(codegen_ctx_t *ctx, pm_node_t *root) {
                 infer_pass(ctx, m->body_node);
                 for (int j = saved_vc; j < ctx->var_count; j++) {
                     if (ctx->vars[j].type.kind == SPINEL_TYPE_ARRAY ||
+                        ctx->vars[j].type.kind == SPINEL_TYPE_FLOAT_ARRAY ||
                         ctx->vars[j].type.kind == SPINEL_TYPE_HASH) {
                         ctx->needs_gc = true;
                         break;
@@ -2997,6 +3003,8 @@ void codegen_program(codegen_ctx_t *ctx, pm_node_t *root) {
                 emit_raw(ctx, "    sp_Val *%s = NULL;\n", cn);
             } else if (v->type.kind == SPINEL_TYPE_ARRAY) {
                 emit_raw(ctx, "    sp_IntArray *%s = NULL;\n", cn);
+            } else if (v->type.kind == SPINEL_TYPE_FLOAT_ARRAY) {
+                emit_raw(ctx, "    sp_FloatArray *%s = NULL;\n", cn);
             } else if (v->type.kind == SPINEL_TYPE_SP_STRING) {
                 emit_raw(ctx, "    sp_String *%s = NULL;\n", cn);
             } else if (v->type.kind == SPINEL_TYPE_VALUE || v->type.kind == SPINEL_TYPE_UNKNOWN) {
@@ -3137,6 +3145,13 @@ void codegen_program(codegen_ctx_t *ctx, pm_node_t *root) {
             else if (v->type.kind == SPINEL_TYPE_BOOLEAN) init = " = FALSE";
             else if (v->type.kind == SPINEL_TYPE_ARRAY) {
                 emit_raw(ctx, "    sp_IntArray *%s = NULL;\n", cn);
+                if (ctx->needs_gc)
+                    emit_raw(ctx, "    SP_GC_ROOT(%s);\n", cn);
+                free(ct); free(cn);
+                continue;
+            }
+            else if (v->type.kind == SPINEL_TYPE_FLOAT_ARRAY) {
+                emit_raw(ctx, "    sp_FloatArray *%s = NULL;\n", cn);
                 if (ctx->needs_gc)
                     emit_raw(ctx, "    SP_GC_ROOT(%s);\n", cn);
                 free(ct); free(cn);

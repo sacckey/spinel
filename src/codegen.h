@@ -24,6 +24,7 @@ typedef enum {
     SPINEL_TYPE_NIL,
     SPINEL_TYPE_OBJECT,  /* user-defined class instance */
     SPINEL_TYPE_ARRAY,   /* sp_IntArray * (built-in integer array) */
+    SPINEL_TYPE_FLOAT_ARRAY, /* sp_FloatArray * (built-in float array) */
     SPINEL_TYPE_HASH,    /* sp_StrIntHash * (string→integer hash table) */
     SPINEL_TYPE_PROC,    /* sp_Val * (lambda/closure) */
     SPINEL_TYPE_POLY,    /* sp_RbValue (polymorphic: tagged union) */
