@@ -8,27 +8,6 @@
 #include "codegen.h"
 
 /* ------------------------------------------------------------------ */
-/* Helper: extract block parameter name (same as in expr.c)           */
-/* ------------------------------------------------------------------ */
-static char *extract_block_param(codegen_ctx_t *ctx, pm_block_node_t *blk) {
-    if (blk->parameters) {
-        if (PM_NODE_TYPE(blk->parameters) == PM_BLOCK_PARAMETERS_NODE) {
-            pm_block_parameters_node_t *bp = (pm_block_parameters_node_t *)blk->parameters;
-            if (bp->parameters && bp->parameters->requireds.size > 0) {
-                pm_node_t *p = bp->parameters->requireds.nodes[0];
-                if (PM_NODE_TYPE(p) == PM_REQUIRED_PARAMETER_NODE)
-                    return cstr(ctx, ((pm_required_parameter_node_t *)p)->name);
-            }
-        }
-        if (PM_NODE_TYPE(blk->parameters) == PM_NUMBERED_PARAMETERS_NODE)
-            return xstrdup("_1");
-        if (PM_NODE_TYPE(blk->parameters) == PM_IT_PARAMETERS_NODE)
-            return xstrdup("_1");
-    }
-    return NULL;
-}
-
-/* ------------------------------------------------------------------ */
 /* Statement codegen                                                  */
 /* ------------------------------------------------------------------ */
 

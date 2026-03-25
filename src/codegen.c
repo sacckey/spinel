@@ -361,24 +361,23 @@ const char *sanitize_method(const char *name) {
 /* Dynamic method array helpers                                       */
 /* ------------------------------------------------------------------ */
 
-static method_info_t *class_add_method(class_info_t *cls) {
-    if (cls->method_count >= cls->methods_cap) {
-        cls->methods_cap = cls->methods_cap ? cls->methods_cap * 2 : 16;
-        cls->methods = realloc(cls->methods, sizeof(method_info_t) * cls->methods_cap);
+/* Generic helper: grow a dynamic method_info_t array and return next slot */
+static method_info_t *add_method(method_info_t **methods, int *count, int *cap) {
+    if (*count >= *cap) {
+        *cap = *cap ? *cap * 2 : 16;
+        *methods = realloc(*methods, sizeof(method_info_t) * (*cap));
     }
-    method_info_t *m = &cls->methods[cls->method_count++];
+    method_info_t *m = &(*methods)[(*count)++];
     memset(m, 0, sizeof(*m));
     return m;
 }
 
+static method_info_t *class_add_method(class_info_t *cls) {
+    return add_method(&cls->methods, &cls->method_count, &cls->methods_cap);
+}
+
 static method_info_t *module_add_method(module_info_t *mod) {
-    if (mod->method_count >= mod->methods_cap) {
-        mod->methods_cap = mod->methods_cap ? mod->methods_cap * 2 : 16;
-        mod->methods = realloc(mod->methods, sizeof(method_info_t) * mod->methods_cap);
-    }
-    method_info_t *m = &mod->methods[mod->method_count++];
-    memset(m, 0, sizeof(*m));
-    return m;
+    return add_method(&mod->methods, &mod->method_count, &mod->methods_cap);
 }
 
 /* Ensure class methods array has room for one more entry (no increment) */
@@ -387,6 +386,100 @@ static void class_ensure_methods(class_info_t *cls, int need) {
         while (cls->methods_cap <= need)
             cls->methods_cap = cls->methods_cap ? cls->methods_cap * 2 : 16;
         cls->methods = realloc(cls->methods, sizeof(method_info_t) * cls->methods_cap);
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* Shared helpers: block param extraction, parameter extraction        */
+/* ------------------------------------------------------------------ */
+
+/* Extract block parameter name from a block node.
+ * Handles explicit |x|, numbered _1, and it-block parameters. */
+char *extract_block_param(codegen_ctx_t *ctx, pm_block_node_t *blk) {
+    if (blk->parameters) {
+        if (PM_NODE_TYPE(blk->parameters) == PM_BLOCK_PARAMETERS_NODE) {
+            pm_block_parameters_node_t *bp = (pm_block_parameters_node_t *)blk->parameters;
+            if (bp->parameters && bp->parameters->requireds.size > 0) {
+                pm_node_t *p = bp->parameters->requireds.nodes[0];
+                if (PM_NODE_TYPE(p) == PM_REQUIRED_PARAMETER_NODE)
+                    return cstr(ctx, ((pm_required_parameter_node_t *)p)->name);
+            }
+        }
+        if (PM_NODE_TYPE(blk->parameters) == PM_NUMBERED_PARAMETERS_NODE)
+            return xstrdup("_1");
+        if (PM_NODE_TYPE(blk->parameters) == PM_IT_PARAMETERS_NODE)
+            return xstrdup("_1");
+    }
+    return NULL;
+}
+
+/* Extract parameters from a pm_parameters_node_t into param_info_t array.
+ * Handles required, optional, rest, and keyword parameters.
+ * Caller passes a param_info_t array, a count pointer, and optional rest info. */
+void extract_params(codegen_ctx_t *ctx, pm_parameters_node_t *params,
+                    param_info_t *out, int *count, bool *has_rest,
+                    char *rest_name, size_t rest_name_size) {
+    /* Required parameters */
+    for (size_t i = 0; i < params->requireds.size && *count < MAX_PARAMS; i++) {
+        pm_node_t *p = params->requireds.nodes[i];
+        if (PM_NODE_TYPE(p) == PM_REQUIRED_PARAMETER_NODE) {
+            pm_required_parameter_node_t *rp = (pm_required_parameter_node_t *)p;
+            char *pname = cstr(ctx, rp->name);
+            snprintf(out[*count].name, 64, "%s", pname);
+            out[*count].type = vt_prim(SPINEL_TYPE_VALUE);
+            (*count)++;
+            free(pname);
+        }
+    }
+    /* Optional parameters (def foo(x = 10)) */
+    for (size_t i = 0; i < params->optionals.size && *count < MAX_PARAMS; i++) {
+        pm_node_t *p = params->optionals.nodes[i];
+        if (PM_NODE_TYPE(p) == PM_OPTIONAL_PARAMETER_NODE) {
+            pm_optional_parameter_node_t *op = (pm_optional_parameter_node_t *)p;
+            char *pname = cstr(ctx, op->name);
+            snprintf(out[*count].name, 64, "%s", pname);
+            out[*count].type = infer_type(ctx, op->value);
+            out[*count].is_optional = true;
+            out[*count].default_node = op->value;
+            (*count)++;
+            free(pname);
+        }
+    }
+    /* Rest parameter (def foo(*args)) */
+    if (params->rest && PM_NODE_TYPE(params->rest) == PM_REST_PARAMETER_NODE) {
+        pm_rest_parameter_node_t *rp = (pm_rest_parameter_node_t *)params->rest;
+        if (rp->name) {
+            char *pname = cstr(ctx, rp->name);
+            if (has_rest) *has_rest = true;
+            if (rest_name) snprintf(rest_name, rest_name_size, "%s", pname);
+            snprintf(out[*count].name, 64, "%s", pname);
+            out[*count].type = vt_prim(SPINEL_TYPE_ARRAY);
+            (*count)++;
+            free(pname);
+        }
+    }
+    /* Keyword parameters (def foo(name:, greeting: "Hello")) */
+    for (size_t i = 0; i < params->keywords.size && *count < MAX_PARAMS; i++) {
+        pm_node_t *p = params->keywords.nodes[i];
+        if (PM_NODE_TYPE(p) == PM_REQUIRED_KEYWORD_PARAMETER_NODE) {
+            pm_required_keyword_parameter_node_t *kp = (pm_required_keyword_parameter_node_t *)p;
+            char *pname = cstr(ctx, kp->name);
+            snprintf(out[*count].name, 64, "%s", pname);
+            out[*count].type = vt_prim(SPINEL_TYPE_VALUE);
+            out[*count].is_keyword = true;
+            (*count)++;
+            free(pname);
+        } else if (PM_NODE_TYPE(p) == PM_OPTIONAL_KEYWORD_PARAMETER_NODE) {
+            pm_optional_keyword_parameter_node_t *kp = (pm_optional_keyword_parameter_node_t *)p;
+            char *pname = cstr(ctx, kp->name);
+            snprintf(out[*count].name, 64, "%s", pname);
+            out[*count].type = infer_type(ctx, kp->value);
+            out[*count].is_keyword = true;
+            out[*count].is_optional = true;
+            out[*count].default_node = kp->value;
+            (*count)++;
+            free(pname);
+        }
     }
 }
 
@@ -419,69 +512,8 @@ static void analyze_method(codegen_ctx_t *ctx, class_info_t *cls,
 
     /* Extract parameters */
     if (def->parameters) {
-        pm_parameters_node_t *params = def->parameters;
-        for (size_t i = 0; i < params->requireds.size && m->param_count < MAX_PARAMS; i++) {
-            pm_node_t *p = params->requireds.nodes[i];
-            if (PM_NODE_TYPE(p) == PM_REQUIRED_PARAMETER_NODE) {
-                pm_required_parameter_node_t *rp = (pm_required_parameter_node_t *)p;
-                char *pname = cstr(ctx, rp->name);
-                snprintf(m->params[m->param_count].name, 64, "%s", pname);
-                m->params[m->param_count].type = vt_prim(SPINEL_TYPE_VALUE);
-                m->param_count++;
-                free(pname);
-            }
-        }
-        /* Optional parameters (def foo(x = 10)) */
-        for (size_t i = 0; i < params->optionals.size && m->param_count < MAX_PARAMS; i++) {
-            pm_node_t *p = params->optionals.nodes[i];
-            if (PM_NODE_TYPE(p) == PM_OPTIONAL_PARAMETER_NODE) {
-                pm_optional_parameter_node_t *op = (pm_optional_parameter_node_t *)p;
-                char *pname = cstr(ctx, op->name);
-                snprintf(m->params[m->param_count].name, 64, "%s", pname);
-                m->params[m->param_count].type = infer_type(ctx, op->value);
-                m->params[m->param_count].is_optional = true;
-                m->params[m->param_count].default_node = op->value;
-                m->param_count++;
-                free(pname);
-            }
-        }
-        /* Rest parameter (def foo(*args)) */
-        if (params->rest && PM_NODE_TYPE(params->rest) == PM_REST_PARAMETER_NODE) {
-            pm_rest_parameter_node_t *rp = (pm_rest_parameter_node_t *)params->rest;
-            if (rp->name) {
-                char *pname = cstr(ctx, rp->name);
-                m->has_rest = true;
-                snprintf(m->rest_name, sizeof(m->rest_name), "%s", pname);
-                snprintf(m->params[m->param_count].name, 64, "%s", pname);
-                m->params[m->param_count].type = vt_prim(SPINEL_TYPE_ARRAY);
-                m->param_count++;
-                free(pname);
-            }
-        }
-        /* Keyword parameters (def foo(name:, greeting: "Hello")) */
-        for (size_t i = 0; i < params->keywords.size && m->param_count < MAX_PARAMS; i++) {
-            pm_node_t *p = params->keywords.nodes[i];
-            if (PM_NODE_TYPE(p) == PM_REQUIRED_KEYWORD_PARAMETER_NODE) {
-                pm_required_keyword_parameter_node_t *kp = (pm_required_keyword_parameter_node_t *)p;
-                char *pname = cstr(ctx, kp->name);
-                snprintf(m->params[m->param_count].name, 64, "%s", pname);
-                m->params[m->param_count].type = vt_prim(SPINEL_TYPE_VALUE);
-                m->params[m->param_count].is_keyword = true;
-                m->param_count++;
-                free(pname);
-            }
-            if (PM_NODE_TYPE(p) == PM_OPTIONAL_KEYWORD_PARAMETER_NODE) {
-                pm_optional_keyword_parameter_node_t *kp = (pm_optional_keyword_parameter_node_t *)p;
-                char *pname = cstr(ctx, kp->name);
-                snprintf(m->params[m->param_count].name, 64, "%s", pname);
-                m->params[m->param_count].type = infer_type(ctx, kp->value);
-                m->params[m->param_count].is_optional = true;
-                m->params[m->param_count].is_keyword = true;
-                m->params[m->param_count].default_node = kp->value;
-                m->param_count++;
-                free(pname);
-            }
-        }
+        extract_params(ctx, def->parameters, m->params, &m->param_count,
+                       &m->has_rest, m->rest_name, sizeof(m->rest_name));
     }
 
     /* Detect getter pattern: def x; @x; end */
@@ -809,20 +841,9 @@ static void analyze_class(codegen_ctx_t *ctx, pm_class_node_t *node) {
                 m->is_class_method = true;
                 m->return_type = vt_prim(SPINEL_TYPE_VALUE);
 
-                if (def->parameters) {
-                    pm_parameters_node_t *params = def->parameters;
-                    for (size_t pi = 0; pi < params->requireds.size && m->param_count < MAX_PARAMS; pi++) {
-                        pm_node_t *p = params->requireds.nodes[pi];
-                        if (PM_NODE_TYPE(p) == PM_REQUIRED_PARAMETER_NODE) {
-                            pm_required_parameter_node_t *rp = (pm_required_parameter_node_t *)p;
-                            char *pname = cstr(ctx, rp->name);
-                            snprintf(m->params[m->param_count].name, 64, "%s", pname);
-                            m->params[m->param_count].type = vt_prim(SPINEL_TYPE_VALUE);
-                            m->param_count++;
-                            free(pname);
-                        }
-                    }
-                }
+                if (def->parameters)
+                    extract_params(ctx, def->parameters, m->params, &m->param_count,
+                                   NULL, NULL, 0);
                 continue;
             }
 
@@ -1157,20 +1178,9 @@ static void analyze_module(codegen_ctx_t *ctx, pm_module_node_t *node) {
             }
 
             /* Parse parameters for mixin methods */
-            if (def->parameters) {
-                pm_parameters_node_t *params = def->parameters;
-                for (size_t pi = 0; pi < params->requireds.size && m->param_count < MAX_PARAMS; pi++) {
-                    pm_node_t *p = params->requireds.nodes[pi];
-                    if (PM_NODE_TYPE(p) == PM_REQUIRED_PARAMETER_NODE) {
-                        pm_required_parameter_node_t *rp = (pm_required_parameter_node_t *)p;
-                        char *pname = cstr(ctx, rp->name);
-                        snprintf(m->params[m->param_count].name, 64, "%s", pname);
-                        m->params[m->param_count].type = vt_prim(SPINEL_TYPE_VALUE);
-                        m->param_count++;
-                        free(pname);
-                    }
-                }
-            }
+            if (def->parameters)
+                extract_params(ctx, def->parameters, m->params, &m->param_count,
+                               NULL, NULL, 0);
         } else if (PM_NODE_TYPE(s) == PM_INSTANCE_VARIABLE_WRITE_NODE) {
             pm_instance_variable_write_node_t *iw =
                 (pm_instance_variable_write_node_t *)s;
@@ -1336,69 +1346,12 @@ static void analyze_top_func(codegen_ctx_t *ctx, pm_def_node_t *def) {
     f->return_type = vt_prim(SPINEL_TYPE_VALUE);
 
     if (def->parameters) {
-        pm_parameters_node_t *params = def->parameters;
-        /* Required parameters */
-        for (size_t i = 0; i < params->requireds.size && f->param_count < MAX_PARAMS; i++) {
-            pm_node_t *p = params->requireds.nodes[i];
-            if (PM_NODE_TYPE(p) == PM_REQUIRED_PARAMETER_NODE) {
-                pm_required_parameter_node_t *rp = (pm_required_parameter_node_t *)p;
-                char *pname = cstr(ctx, rp->name);
-                snprintf(f->params[f->param_count].name, 64, "%s", pname);
-                f->params[f->param_count].type = vt_prim(SPINEL_TYPE_VALUE);
-                f->param_count++;
-                free(pname);
-            }
-        }
-        /* Optional parameters (def foo(x = 10)) */
-        for (size_t i = 0; i < params->optionals.size && f->param_count < MAX_PARAMS; i++) {
-            pm_node_t *p = params->optionals.nodes[i];
-            if (PM_NODE_TYPE(p) == PM_OPTIONAL_PARAMETER_NODE) {
-                pm_optional_parameter_node_t *op = (pm_optional_parameter_node_t *)p;
-                char *pname = cstr(ctx, op->name);
-                snprintf(f->params[f->param_count].name, 64, "%s", pname);
-                f->params[f->param_count].type = infer_type(ctx, op->value);
-                f->params[f->param_count].is_optional = true;
-                f->params[f->param_count].default_node = op->value;
-                f->param_count++;
-                free(pname);
-            }
-        }
-        /* Rest parameter (def foo(*args)) */
-        if (params->rest && PM_NODE_TYPE(params->rest) == PM_REST_PARAMETER_NODE) {
-            pm_rest_parameter_node_t *rp = (pm_rest_parameter_node_t *)params->rest;
-            char *pname = cstr(ctx, rp->name);
-            f->has_rest = true;
-            snprintf(f->rest_name, sizeof(f->rest_name), "%s", pname);
-            f->rest_param_index = f->param_count;
-            snprintf(f->params[f->param_count].name, 64, "%s", pname);
-            f->params[f->param_count].type = vt_prim(SPINEL_TYPE_ARRAY);
-            /* Note: is_array is NOT set; vt_ctype for ARRAY already returns pointer type */
-            f->param_count++;
-            free(pname);
-        }
-        /* Keyword parameters (def foo(name:, greeting: "Hello")) */
-        for (size_t i = 0; i < params->keywords.size && f->param_count < MAX_PARAMS; i++) {
-            pm_node_t *p = params->keywords.nodes[i];
-            if (PM_NODE_TYPE(p) == PM_REQUIRED_KEYWORD_PARAMETER_NODE) {
-                pm_required_keyword_parameter_node_t *kp = (pm_required_keyword_parameter_node_t *)p;
-                char *pname = cstr(ctx, kp->name);
-                snprintf(f->params[f->param_count].name, 64, "%s", pname);
-                f->params[f->param_count].type = vt_prim(SPINEL_TYPE_VALUE);
-                f->params[f->param_count].is_keyword = true;
-                f->param_count++;
-                free(pname);
-            } else if (PM_NODE_TYPE(p) == PM_OPTIONAL_KEYWORD_PARAMETER_NODE) {
-                pm_optional_keyword_parameter_node_t *kp = (pm_optional_keyword_parameter_node_t *)p;
-                char *pname = cstr(ctx, kp->name);
-                snprintf(f->params[f->param_count].name, 64, "%s", pname);
-                f->params[f->param_count].type = infer_type(ctx, kp->value);
-                f->params[f->param_count].is_keyword = true;
-                f->params[f->param_count].is_optional = true;
-                f->params[f->param_count].default_node = kp->value;
-                f->param_count++;
-                free(pname);
-            }
-        }
+        int count_before = f->param_count;
+        extract_params(ctx, def->parameters, f->params, &f->param_count,
+                       &f->has_rest, f->rest_name, sizeof(f->rest_name));
+        if (f->has_rest)
+            f->rest_param_index = count_before + (int)def->parameters->requireds.size
+                                + (int)def->parameters->optionals.size;
     }
 
     /* Detect &block parameter */
@@ -1458,34 +1411,9 @@ void class_analysis_pass(codegen_ctx_t *ctx, pm_node_t *root) {
                                 m->return_type = vt_prim(SPINEL_TYPE_VALUE);
 
                                 /* Extract parameters */
-                                if (def->parameters) {
-                                    pm_parameters_node_t *params = def->parameters;
-                                    for (size_t pi = 0; pi < params->requireds.size && m->param_count < MAX_PARAMS; pi++) {
-                                        pm_node_t *p = params->requireds.nodes[pi];
-                                        if (PM_NODE_TYPE(p) == PM_REQUIRED_PARAMETER_NODE) {
-                                            pm_required_parameter_node_t *rp = (pm_required_parameter_node_t *)p;
-                                            char *pname = cstr(ctx, rp->name);
-                                            snprintf(m->params[m->param_count].name, 64, "%s", pname);
-                                            m->params[m->param_count].type = vt_prim(SPINEL_TYPE_VALUE);
-                                            m->param_count++;
-                                            free(pname);
-                                        }
-                                    }
-                                    /* Optional parameters */
-                                    for (size_t pi = 0; pi < params->optionals.size && m->param_count < MAX_PARAMS; pi++) {
-                                        pm_node_t *p = params->optionals.nodes[pi];
-                                        if (PM_NODE_TYPE(p) == PM_OPTIONAL_PARAMETER_NODE) {
-                                            pm_optional_parameter_node_t *op = (pm_optional_parameter_node_t *)p;
-                                            char *pname = cstr(ctx, op->name);
-                                            snprintf(m->params[m->param_count].name, 64, "%s", pname);
-                                            m->params[m->param_count].type = infer_type(ctx, op->value);
-                                            m->params[m->param_count].is_optional = true;
-                                            m->params[m->param_count].default_node = op->value;
-                                            m->param_count++;
-                                            free(pname);
-                                        }
-                                    }
-                                }
+                                if (def->parameters)
+                                    extract_params(ctx, def->parameters, m->params, &m->param_count,
+                                                   NULL, NULL, 0);
                             }
                         }
                     }
@@ -1529,19 +1457,9 @@ void class_analysis_pass(codegen_ctx_t *ctx, pm_node_t *root) {
                     /* Extract block parameters as function parameters */
                     if (blk->parameters && PM_NODE_TYPE(blk->parameters) == PM_BLOCK_PARAMETERS_NODE) {
                         pm_block_parameters_node_t *bp = (pm_block_parameters_node_t *)blk->parameters;
-                        if (bp->parameters) {
-                            for (size_t pi = 0; pi < bp->parameters->requireds.size && f->param_count < MAX_PARAMS; pi++) {
-                                pm_node_t *p = bp->parameters->requireds.nodes[pi];
-                                if (PM_NODE_TYPE(p) == PM_REQUIRED_PARAMETER_NODE) {
-                                    pm_required_parameter_node_t *rp = (pm_required_parameter_node_t *)p;
-                                    char *pname = cstr(ctx, rp->name);
-                                    snprintf(f->params[f->param_count].name, 64, "%s", pname);
-                                    f->params[f->param_count].type = vt_prim(SPINEL_TYPE_VALUE);
-                                    f->param_count++;
-                                    free(pname);
-                                }
-                            }
-                        }
+                        if (bp->parameters)
+                            extract_params(ctx, bp->parameters, f->params, &f->param_count,
+                                           NULL, NULL, 0);
                     }
                     /* Detect yield in block body */
                     f->has_yield = f->body_node ? has_yield_nodes(f->body_node) : false;
@@ -2971,10 +2889,7 @@ void codegen_program(codegen_ctx_t *ctx, pm_node_t *root) {
         if (!v->is_constant) continue;
         char *ct = vt_ctype(ctx, v->type, false);
         char *cn = make_cname(v->name, true);
-        const char *init = "";
-        if (v->type.kind == SPINEL_TYPE_INTEGER) init = " = 0";
-        else if (v->type.kind == SPINEL_TYPE_FLOAT) init = " = 0.0";
-        else if (v->type.kind == SPINEL_TYPE_PROC) init = " = NULL";
+        const char *init = default_init_for_type(v->type.kind);
         emit_raw(ctx, "static %s %s%s;\n", ct, cn, init);
         free(ct); free(cn);
     }
@@ -3265,11 +3180,7 @@ void codegen_program(codegen_ctx_t *ctx, pm_node_t *root) {
             var_entry_t *v = &ctx->vars[vi];
             char *ct = vt_ctype(ctx, v->type, false);
             char *cn = make_cname(v->name, v->is_constant);
-            const char *init = "";
-            if (v->type.kind == SPINEL_TYPE_INTEGER) init = " = 0";
-            else if (v->type.kind == SPINEL_TYPE_FLOAT) init = " = 0.0";
-            else if (v->type.kind == SPINEL_TYPE_BOOLEAN) init = " = FALSE";
-            else if (v->type.kind == SPINEL_TYPE_STRING) init = " = NULL";
+            const char *init = default_init_for_type(v->type.kind);
             emit(ctx, "%s %s%s;\n", ct, cn, init);
             free(ct); free(cn);
         }
@@ -3338,11 +3249,7 @@ void codegen_program(codegen_ctx_t *ctx, pm_node_t *root) {
                 /* In lambda mode, VALUE vars might hold sp_StrArray* or other pointers */
                 emit_raw(ctx, "    void *%s = NULL;\n", cn);
             } else {
-                const char *init = "";
-                if (v->type.kind == SPINEL_TYPE_INTEGER) init = " = 0";
-                else if (v->type.kind == SPINEL_TYPE_FLOAT) init = " = 0.0";
-                else if (v->type.kind == SPINEL_TYPE_BOOLEAN) init = " = FALSE";
-                emit_raw(ctx, "    %s %s%s;\n", ct, cn, init);
+                emit_raw(ctx, "    %s %s%s;\n", ct, cn, default_init_for_type(v->type.kind));
             }
             free(ct); free(cn);
         }
@@ -3466,11 +3373,8 @@ void codegen_program(codegen_ctx_t *ctx, pm_node_t *root) {
             if (v->is_constant) continue;
             char *ct = vt_ctype(ctx, v->type, false);
             char *cn = make_cname(v->name, v->is_constant);
-            const char *init = "";
-            if (v->type.kind == SPINEL_TYPE_INTEGER) init = " = 0";
-            else if (v->type.kind == SPINEL_TYPE_FLOAT) init = " = 0.0";
-            else if (v->type.kind == SPINEL_TYPE_BOOLEAN) init = " = FALSE";
-            else if (v->type.kind == SPINEL_TYPE_ARRAY) {
+            const char *init = default_init_for_type(v->type.kind);
+            if (v->type.kind == SPINEL_TYPE_ARRAY) {
                 emit_raw(ctx, "    sp_IntArray *%s = NULL;\n", cn);
                 if (ctx->needs_gc)
                     emit_raw(ctx, "    SP_GC_ROOT(%s);\n", cn);

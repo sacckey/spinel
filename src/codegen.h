@@ -327,6 +327,18 @@ static inline const char *escape_c_keyword(const char *name) {
     return name;
 }
 
+/* --- Default initializer for a type kind (e.g., " = 0" for INTEGER) --- */
+static inline const char *default_init_for_type(spinel_type_t kind) {
+    switch (kind) {
+    case SPINEL_TYPE_INTEGER: return " = 0";
+    case SPINEL_TYPE_FLOAT:   return " = 0.0";
+    case SPINEL_TYPE_BOOLEAN: return " = FALSE";
+    case SPINEL_TYPE_STRING:
+    case SPINEL_TYPE_PROC:    return " = NULL";
+    default:                  return "";
+    }
+}
+
 /* --- Shared utility functions (codegen.c) --- */
 char *xstrdup(const char *s);
 char *sfmt(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
@@ -407,6 +419,12 @@ void emit_mega_dispatch_funcs(codegen_ctx_t *ctx);
 
 /* --- Lambda codegen (codegen.c) --- */
 char *codegen_lambda(codegen_ctx_t *ctx, pm_lambda_node_t *lam);
+
+/* --- Block/parameter helpers (codegen.c) --- */
+char *extract_block_param(codegen_ctx_t *ctx, pm_block_node_t *blk);
+void extract_params(codegen_ctx_t *ctx, pm_parameters_node_t *params,
+                    param_info_t *out, int *count, bool *has_rest,
+                    char *rest_name, size_t rest_name_size);
 
 /* --- Require handling (codegen.c) --- */
 bool is_require_relative(codegen_ctx_t *ctx, pm_node_t *node);

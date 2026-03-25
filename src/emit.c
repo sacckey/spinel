@@ -394,11 +394,8 @@ void emit_method(codegen_ctx_t *ctx, class_info_t *cls, method_info_t *m) {
             free(ct); free(cn);
             continue;
         }
-        const char *init = "";
-        if (v->type.kind == SPINEL_TYPE_INTEGER) init = " = 0";
-        else if (v->type.kind == SPINEL_TYPE_FLOAT) init = " = 0.0";
-        else if (v->type.kind == SPINEL_TYPE_BOOLEAN) init = " = FALSE";
-        else if (v->type.kind == SPINEL_TYPE_OBJECT) {
+        const char *init = default_init_for_type(v->type.kind);
+        if (v->type.kind == SPINEL_TYPE_OBJECT) {
             class_info_t *vc = find_class(ctx, v->type.klass);
             if (vc && vc->is_value_type) {
                 /* Value type: stack-allocated struct */
@@ -629,13 +626,9 @@ void emit_top_func(codegen_ctx_t *ctx, func_info_t *f) {
                     continue;
                 }
             }
-            const char *init = "";
+            const char *init = default_init_for_type(v->type.kind);
             bool needs_root = false;
-            if (v->type.kind == SPINEL_TYPE_INTEGER) init = " = 0";
-            else if (v->type.kind == SPINEL_TYPE_FLOAT) init = " = 0.0";
-            else if (v->type.kind == SPINEL_TYPE_BOOLEAN) init = " = FALSE";
-            else if (v->type.kind == SPINEL_TYPE_STRING) init = " = NULL";
-            else if (strstr(ct, "*")) { init = " = NULL"; needs_root = true; }
+            if (!*init && strstr(ct, "*")) { init = " = NULL"; needs_root = true; }
             emit(ctx, "%s %s%s;\n", ct, cn, init);
             if (needs_root && func_has_gc_vars)
                 emit(ctx, "SP_GC_ROOT(%s);\n", cn);
@@ -678,10 +671,7 @@ void emit_top_func(codegen_ctx_t *ctx, func_info_t *f) {
                         vtype_t et = (v) ? v->type : (vtype); \
                         char *ct = vt_ctype(ctx, et, false); \
                         char *cn = make_cname((vname), false); \
-                        const char *init = ""; \
-                        if (et.kind == SPINEL_TYPE_INTEGER) init = " = 0"; \
-                        else if (et.kind == SPINEL_TYPE_FLOAT) init = " = 0.0"; \
-                        else if (et.kind == SPINEL_TYPE_STRING) init = " = NULL"; \
+                        const char *init = default_init_for_type(et.kind); \
                         emit(ctx, "%s %s%s;\n", ct, cn, init); \
                         free(ct); free(cn); \
                         if (emitted_shadow_count < 16) \
