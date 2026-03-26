@@ -1382,6 +1382,124 @@ static char *codegen_expr_call(codegen_ctx_t *ctx, pm_call_node_t *call, pm_node
         r = sfmt("(!sp_IntArray_neq(%s, %s))", recv, arg);
         free(arg);
       }
+      else if (strcmp(method, "all?") == 0 && call->block &&
+           PM_NODE_TYPE(call->block) == PM_BLOCK_NODE) {
+        pm_block_node_t *blk = (pm_block_node_t *)call->block;
+        char *bpname = extract_block_param(ctx, blk);
+        int tmp = ctx->temp_counter++;
+        emit(ctx, "mrb_bool _all_%d = TRUE;\n", tmp);
+        emit(ctx, "for (mrb_int _ai_%d = 0; _ai_%d < sp_IntArray_length(%s); _ai_%d++) {\n", tmp, tmp, recv, tmp);
+        ctx->indent++;
+        if (bpname) {
+          char *cn = make_cname(bpname, false);
+          emit(ctx, "mrb_int %s = sp_IntArray_get(%s, _ai_%d);\n", cn, recv, tmp);
+          free(cn);
+        }
+        if (blk->body) {
+          pm_statements_node_t *stmts = (pm_statements_node_t *)blk->body;
+          if (stmts->body.size > 0) {
+            char *cond = codegen_expr(ctx, stmts->body.nodes[stmts->body.size - 1]);
+            emit(ctx, "if (!(%s)) { _all_%d = FALSE; break; }\n", cond, tmp);
+            free(cond);
+          }
+        }
+        ctx->indent--;
+        emit(ctx, "}\n");
+        free(bpname);
+        r = sfmt("_all_%d", tmp);
+      }
+      else if (strcmp(method, "none?") == 0 && call->block &&
+           PM_NODE_TYPE(call->block) == PM_BLOCK_NODE) {
+        pm_block_node_t *blk = (pm_block_node_t *)call->block;
+        char *bpname = extract_block_param(ctx, blk);
+        int tmp = ctx->temp_counter++;
+        emit(ctx, "mrb_bool _none_%d = TRUE;\n", tmp);
+        emit(ctx, "for (mrb_int _ai_%d = 0; _ai_%d < sp_IntArray_length(%s); _ai_%d++) {\n", tmp, tmp, recv, tmp);
+        ctx->indent++;
+        if (bpname) {
+          char *cn = make_cname(bpname, false);
+          emit(ctx, "mrb_int %s = sp_IntArray_get(%s, _ai_%d);\n", cn, recv, tmp);
+          free(cn);
+        }
+        if (blk->body) {
+          pm_statements_node_t *stmts = (pm_statements_node_t *)blk->body;
+          if (stmts->body.size > 0) {
+            char *cond = codegen_expr(ctx, stmts->body.nodes[stmts->body.size - 1]);
+            emit(ctx, "if (%s) { _none_%d = FALSE; break; }\n", cond, tmp);
+            free(cond);
+          }
+        }
+        ctx->indent--;
+        emit(ctx, "}\n");
+        free(bpname);
+        r = sfmt("_none_%d", tmp);
+      }
+      else if ((strcmp(method, "index") == 0 || strcmp(method, "find_index") == 0) && call->arguments && call->arguments->arguments.size >= 1 && !call->block) {
+        char *val = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+        int tmp = ctx->temp_counter++;
+        emit(ctx, "mrb_int _fidx_%d = -1;\n", tmp);
+        emit(ctx, "for (mrb_int _i = 0; _i < sp_IntArray_length(%s); _i++) if (sp_IntArray_get(%s, _i) == %s) { _fidx_%d = _i; break; }\n", recv, recv, val, tmp);
+        r = sfmt("_fidx_%d", tmp);
+        free(val);
+      }
+      else if (strcmp(method, "+") == 0 && call->arguments && call->arguments->arguments.size == 1) {
+        char *arg = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+        int tmp = ctx->temp_counter++;
+        emit(ctx, "sp_IntArray *_cat_%d = sp_IntArray_dup(%s);\n", tmp, recv);
+        emit(ctx, "for (mrb_int _i = 0; _i < sp_IntArray_length(%s); _i++) sp_IntArray_push(_cat_%d, sp_IntArray_get(%s, _i));\n", arg, tmp, arg);
+        r = sfmt("_cat_%d", tmp);
+        free(arg);
+      }
+      else if (strcmp(method, "-") == 0 && call->arguments && call->arguments->arguments.size == 1) {
+        char *arg = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+        int tmp = ctx->temp_counter++;
+        emit(ctx, "sp_IntArray *_diff_%d = sp_IntArray_new();\n", tmp);
+        emit(ctx, "for (mrb_int _i = 0; _i < sp_IntArray_length(%s); _i++) {\n", recv);
+        emit(ctx, "  mrb_int _v = sp_IntArray_get(%s, _i); mrb_bool _found = FALSE;\n", recv);
+        emit(ctx, "  for (mrb_int _j = 0; _j < sp_IntArray_length(%s); _j++) if (sp_IntArray_get(%s, _j) == _v) { _found = TRUE; break; }\n", arg, arg);
+        emit(ctx, "  if (!_found) sp_IntArray_push(_diff_%d, _v);\n", tmp);
+        emit(ctx, "}\n");
+        r = sfmt("_diff_%d", tmp);
+        free(arg);
+      }
+      else if (strcmp(method, "take") == 0 && call->arguments && call->arguments->arguments.size == 1) {
+        char *n = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+        int tmp = ctx->temp_counter++;
+        emit(ctx, "sp_IntArray *_take_%d = sp_IntArray_new();\n", tmp);
+        emit(ctx, "for (mrb_int _i = 0; _i < %s && _i < sp_IntArray_length(%s); _i++) sp_IntArray_push(_take_%d, sp_IntArray_get(%s, _i));\n", n, recv, tmp, recv);
+        r = sfmt("_take_%d", tmp);
+        free(n);
+      }
+      else if (strcmp(method, "drop") == 0 && call->arguments && call->arguments->arguments.size == 1) {
+        char *n = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+        int tmp = ctx->temp_counter++;
+        emit(ctx, "sp_IntArray *_drop_%d = sp_IntArray_new();\n", tmp);
+        emit(ctx, "for (mrb_int _i = %s; _i < sp_IntArray_length(%s); _i++) sp_IntArray_push(_drop_%d, sp_IntArray_get(%s, _i));\n", n, recv, tmp, recv);
+        r = sfmt("_drop_%d", tmp);
+        free(n);
+      }
+      else if (strcmp(method, "delete") == 0 && call->arguments && call->arguments->arguments.size == 1 && !call->block) {
+        char *val = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+        int tmp = ctx->temp_counter++;
+        emit(ctx, "mrb_int _del_%d = 0;\n", tmp);
+        emit(ctx, "for (mrb_int _i = 0; _i < %s->len; _i++) if (%s->data[%s->start + _i] == %s) {\n", recv, recv, recv, val);
+        emit(ctx, "  _del_%d = %s; memmove(%s->data + %s->start + _i, %s->data + %s->start + _i + 1, sizeof(mrb_int) * (%s->len - _i - 1)); %s->len--; break;\n", tmp, val, recv, recv, recv, recv, recv, recv);
+        emit(ctx, "}\n");
+        r = sfmt("_del_%d", tmp);
+        free(val);
+      }
+      else if (strcmp(method, "delete_at") == 0 && call->arguments && call->arguments->arguments.size == 1) {
+        char *idx = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+        int tmp = ctx->temp_counter++;
+        emit(ctx, "mrb_int _da_i_%d = %s; if (_da_i_%d < 0) _da_i_%d += %s->len;\n", tmp, idx, tmp, tmp, recv);
+        emit(ctx, "mrb_int _da_%d = sp_IntArray_get(%s, _da_i_%d);\n", tmp, recv, tmp);
+        emit(ctx, "memmove(%s->data + %s->start + _da_i_%d, %s->data + %s->start + _da_i_%d + 1, sizeof(mrb_int) * (%s->len - _da_i_%d - 1)); %s->len--;\n", recv, recv, tmp, recv, recv, tmp, recv, tmp, recv);
+        r = sfmt("_da_%d", tmp);
+        free(idx);
+      }
+      else if (strcmp(method, "sample") == 0) {
+        r = sfmt("sp_IntArray_get(%s, rand() %% sp_IntArray_length(%s))", recv, recv);
+      }
       else if (strcmp(method, "any?") == 0 && call->block &&
            PM_NODE_TYPE(call->block) == PM_BLOCK_NODE) {
         pm_block_node_t *blk = (pm_block_node_t *)call->block;
@@ -1958,6 +2076,7 @@ static char *codegen_expr_call(codegen_ctx_t *ctx, pm_call_node_t *call, pm_node
     /* sp_StrIntHash method calls */
     if (recv_t.kind == SPINEL_TYPE_HASH) {
       char *recv = codegen_expr(ctx, call->receiver);
+      int argc = call->arguments ? (int)call->arguments->arguments.size : 0;
       char *r = NULL;
       if (strcmp(method, "[]") == 0 && call->arguments &&
         call->arguments->arguments.size == 1) {
@@ -2042,6 +2161,33 @@ static char *codegen_expr_call(codegen_ctx_t *ctx, pm_call_node_t *call, pm_node
         free(bpname);
         r = sfmt("_tv_%d", tmp);
       }
+      else if (strcmp(method, "empty?") == 0)
+        r = sfmt("(sp_StrIntHash_length(%s) == 0)", recv);
+      else if (strcmp(method, "count") == 0 && !call->block)
+        r = sfmt("sp_StrIntHash_length(%s)", recv);
+      else if ((strcmp(method, "include?") == 0 || strcmp(method, "member?") == 0) && call->arguments && call->arguments->arguments.size >= 1) {
+        char *key = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+        r = sfmt("sp_StrIntHash_has_key(%s, %s)", recv, key);
+        free(key);
+      }
+      else if (strcmp(method, "store") == 0 && argc >= 2) {
+        char *key = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+        char *val = codegen_expr(ctx, call->arguments->arguments.nodes[1]);
+        r = sfmt("sp_StrIntHash_set(%s, %s, %s)", recv, key, val);
+        free(key); free(val);
+      }
+      else if (strcmp(method, "fetch") == 0 && call->arguments && call->arguments->arguments.size >= 1) {
+        char *key = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+        if (argc >= 2) {
+          char *dflt = codegen_expr(ctx, call->arguments->arguments.nodes[1]);
+          r = sfmt("(sp_StrIntHash_has_key(%s, %s) ? sp_StrIntHash_get(%s, %s) : %s)", recv, key, recv, key, dflt);
+          free(dflt);
+        }
+        else {
+          r = sfmt("sp_StrIntHash_get(%s, %s)", recv, key);
+        }
+        free(key);
+      }
       if (r) {
         free(recv); free(method);
         return r;
@@ -2052,6 +2198,7 @@ static char *codegen_expr_call(codegen_ctx_t *ctx, pm_call_node_t *call, pm_node
     /* sp_RbHash method calls (heterogeneous hash) */
     if (recv_t.kind == SPINEL_TYPE_RB_HASH) {
       char *recv = codegen_expr(ctx, call->receiver);
+      int argc = call->arguments ? (int)call->arguments->arguments.size : 0;
       char *r = NULL;
       if (strcmp(method, "[]") == 0 && call->arguments &&
         call->arguments->arguments.size == 1) {
@@ -2148,6 +2295,27 @@ static char *codegen_expr_call(codegen_ctx_t *ctx, pm_call_node_t *call, pm_node
         }
         free(bpname);
         r = sfmt("_tv_%d", tmp);
+      }
+      else if (strcmp(method, "empty?") == 0)
+        r = sfmt("(sp_RbHash_length(%s) == 0)", recv);
+      else if (strcmp(method, "count") == 0 && !call->block)
+        r = sfmt("sp_RbHash_length(%s)", recv);
+      else if ((strcmp(method, "include?") == 0 || strcmp(method, "member?") == 0) && call->arguments && call->arguments->arguments.size >= 1) {
+        char *key = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+        r = sfmt("sp_RbHash_has_key(%s, %s)", recv, key);
+        free(key);
+      }
+      else if (strcmp(method, "fetch") == 0 && call->arguments && call->arguments->arguments.size >= 1) {
+        char *key = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+        if (argc >= 2) {
+          char *dflt = codegen_expr(ctx, call->arguments->arguments.nodes[1]);
+          r = sfmt("(sp_RbHash_has_key(%s, %s) ? sp_RbHash_get(%s, %s) : %s)", recv, key, recv, key, dflt);
+          free(dflt);
+        }
+        else {
+          r = sfmt("sp_RbHash_get(%s, %s)", recv, key);
+        }
+        free(key);
       }
       if (r) {
         free(recv); free(method);
@@ -2258,7 +2426,7 @@ static char *codegen_expr_call(codegen_ctx_t *ctx, pm_call_node_t *call, pm_node
         r = sfmt("sp_StringIO_getbyte(%s)", recv);
       else if (strcmp(method, "rewind") == 0)
         r = sfmt("sp_StringIO_rewind(%s)", recv);
-      else if (strcmp(method, "seek") == 0 && argc >= 1) {
+      else if (strcmp(method, "seek") == 0 && call->arguments && call->arguments->arguments.size >= 1) {
         char *arg = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
         if (argc >= 2) {
           char *arg2 = codegen_expr(ctx, call->arguments->arguments.nodes[1]);
@@ -2626,6 +2794,53 @@ static char *codegen_expr_call(codegen_ctx_t *ctx, pm_call_node_t *call, pm_node
         r = sfmt("((mrb_int)strtol(%s, NULL, 16))", recv);
       else if (strcmp(method, "oct") == 0)
         r = sfmt("((mrb_int)strtol(%s, NULL, 8))", recv);
+      else if (strcmp(method, "index") == 0 && call->arguments && call->arguments->arguments.size >= 1) {
+        char *arg = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+        int t = ctx->temp_counter++;
+        emit(ctx, "const char *_idx_%d = strstr(%s, %s);\n", t, recv, arg);
+        r = sfmt("(_idx_%d ? (mrb_int)(_idx_%d - %s) : -1)", t, t, recv);
+        free(arg);
+      }
+      else if (strcmp(method, "rindex") == 0 && call->arguments && call->arguments->arguments.size >= 1) {
+        char *arg = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+        int t = ctx->temp_counter++;
+        emit(ctx, "mrb_int _ri_%d = -1; { size_t sl = strlen(%s), pl = strlen(%s);\n", t, recv, arg);
+        emit(ctx, "  if (pl <= sl) for (mrb_int _i = sl - pl; _i >= 0; _i--)\n");
+        emit(ctx, "    if (strncmp(%s + _i, %s, pl) == 0) { _ri_%d = _i; break; }\n}\n", recv, arg, t);
+        r = sfmt("_ri_%d", t);
+        free(arg);
+      }
+      else if (strcmp(method, "chop") == 0) {
+        int t = ctx->temp_counter++;
+        emit(ctx, "size_t _chop_%d = strlen(%s); if (_chop_%d > 0) _chop_%d--;\n", t, recv, t, t);
+        emit(ctx, "if (_chop_%d > 0 && %s[_chop_%d] == '\\n' && %s[_chop_%d - 1] == '\\r') _chop_%d--;\n", t, recv, t, recv, t, t);
+        r = sfmt("sp_str_slice(%s, 0, _chop_%d)", recv, t);
+      }
+      else if (strcmp(method, "swapcase") == 0) {
+        int t = ctx->temp_counter++;
+        emit(ctx, "size_t _sw_%d = strlen(%s); char *_swr_%d = (char *)malloc(_sw_%d + 1);\n", t, recv, t, t);
+        emit(ctx, "for (size_t _i = 0; _i <= _sw_%d; _i++) _swr_%d[_i] = isupper((unsigned char)%s[_i]) ? tolower((unsigned char)%s[_i]) : toupper((unsigned char)%s[_i]);\n", t, t, recv, recv, recv);
+        r = sfmt("_swr_%d", t);
+      }
+      else if (strcmp(method, "concat") == 0 && call->arguments && call->arguments->arguments.size >= 1) {
+        char *arg = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+        r = sfmt("sp_str_concat(%s, %s)", recv, arg);
+        free(arg);
+      }
+      else if (strcmp(method, "ascii_only?") == 0) {
+        int t = ctx->temp_counter++;
+        emit(ctx, "mrb_bool _ao_%d = TRUE; for (const char *_p = %s; *_p; _p++) if ((unsigned char)*_p > 127) { _ao_%d = FALSE; break; }\n", t, recv, t);
+        r = sfmt("_ao_%d", t);
+      }
+      else if (strcmp(method, "encode") == 0 || strcmp(method, "b") == 0 ||
+               strcmp(method, "intern") == 0)
+        r = sfmt("%s", recv); /* no-op in AOT */
+      else if (strcmp(method, "match?") == 0 && call->arguments && call->arguments->arguments.size >= 1 &&
+               PM_NODE_TYPE(call->arguments->arguments.nodes[0]) == PM_STRING_NODE) {
+        char *pat = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+        r = sfmt("(strstr(%s, %s) != NULL)", recv, pat);
+        free(pat);
+      }
       if (r) {
         free(recv); free(method);
         return r;
@@ -3037,10 +3252,56 @@ static char *codegen_expr_call(codegen_ctx_t *ctx, pm_call_node_t *call, pm_node
         r = sfmt("((%s) < (%s) ? (%s) : (%s) > (%s) ? (%s) : (%s))", recv, lo, lo, recv, hi, hi, recv);
         free(lo); free(hi);
       }
-      else if (strcmp(method, "succ") == 0)
+      else if (strcmp(method, "succ") == 0 || strcmp(method, "next") == 0)
         r = sfmt("((%s) + 1)", recv);
-      else if (strcmp(method, "itself") == 0)
+      else if (strcmp(method, "pred") == 0)
+        r = sfmt("((%s) - 1)", recv);
+      else if (strcmp(method, "itself") == 0 || strcmp(method, "to_i") == 0 ||
+               strcmp(method, "to_int") == 0 || strcmp(method, "floor") == 0 ||
+               strcmp(method, "ceil") == 0 || strcmp(method, "round") == 0 ||
+               strcmp(method, "truncate") == 0 || strcmp(method, "ord") == 0)
         r = sfmt("%s", recv);
+      else if (strcmp(method, "to_f") == 0)
+        r = sfmt("((mrb_float)(%s))", recv);
+      else if (strcmp(method, "to_s") == 0)
+        r = sfmt("sp_int_to_s(%s)", recv);
+      else if (strcmp(method, "gcd") == 0 && call->arguments && call->arguments->arguments.size == 1) {
+        char *arg = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+        int t = ctx->temp_counter++;
+        emit(ctx, "mrb_int _gcd_a_%d = (%s) < 0 ? -(%s) : (%s);\n", t, recv, recv, recv);
+        emit(ctx, "mrb_int _gcd_b_%d = (%s) < 0 ? -(%s) : (%s);\n", t, arg, arg, arg);
+        emit(ctx, "while (_gcd_b_%d) { mrb_int _t = _gcd_b_%d; _gcd_b_%d = _gcd_a_%d %% _gcd_b_%d; _gcd_a_%d = _t; }\n", t, t, t, t, t, t);
+        r = sfmt("_gcd_a_%d", t);
+        free(arg);
+      }
+      else if (strcmp(method, "lcm") == 0 && call->arguments && call->arguments->arguments.size == 1) {
+        char *arg = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+        int t = ctx->temp_counter++;
+        emit(ctx, "mrb_int _la_%d = (%s) < 0 ? -(%s) : (%s), _lb_%d = (%s) < 0 ? -(%s) : (%s);\n",
+             t, recv, recv, recv, t, arg, arg, arg);
+        emit(ctx, "mrb_int _ga_%d = _la_%d, _gb_%d = _lb_%d;\n", t, t, t, t);
+        emit(ctx, "while (_gb_%d) { mrb_int _t = _gb_%d; _gb_%d = _ga_%d %% _gb_%d; _ga_%d = _t; }\n", t, t, t, t, t, t);
+        r = sfmt("(_la_%d / _ga_%d * _lb_%d)", t, t, t);
+        free(arg);
+      }
+      else if (strcmp(method, "bit_length") == 0) {
+        int t = ctx->temp_counter++;
+        emit(ctx, "mrb_int _bl_%d = (%s) < 0 ? ~(%s) : (%s);\n", t, recv, recv, recv);
+        emit(ctx, "mrb_int _bln_%d = 0; while (_bl_%d) { _bln_%d++; _bl_%d >>= 1; }\n", t, t, t, t);
+        r = sfmt("_bln_%d", t);
+      }
+      else if (strcmp(method, "pow") == 0 && call->arguments && call->arguments->arguments.size >= 1) {
+        char *exp = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+        r = sfmt("((mrb_int)pow((double)%s, (double)%s))", recv, exp);
+        free(exp);
+      }
+      else if (strcmp(method, "[]") == 0 && call->arguments && call->arguments->arguments.size == 1) {
+        char *bit = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+        r = sfmt("(((%s) >> (%s)) & 1)", recv, bit);
+        free(bit);
+      }
+      else if (strcmp(method, "downto") == 0) r = sfmt("%s", recv); /* handled in stmt */
+      else if (strcmp(method, "upto") == 0) r = sfmt("%s", recv); /* handled in stmt */
       if (r) { free(recv); free(method); return r; }
       free(recv);
     }
@@ -3064,6 +3325,27 @@ static char *codegen_expr_call(codegen_ctx_t *ctx, pm_call_node_t *call, pm_node
         char *exp = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
         r = sfmt("pow(%s, %s)", recv, exp);
         free(exp);
+      }
+      else if (strcmp(method, "zero?") == 0)
+        r = sfmt("((%s) == 0.0)", recv);
+      else if (strcmp(method, "positive?") == 0)
+        r = sfmt("((%s) > 0.0)", recv);
+      else if (strcmp(method, "negative?") == 0)
+        r = sfmt("((%s) < 0.0)", recv);
+      else if (strcmp(method, "infinite?") == 0)
+        r = sfmt("(isinf(%s) ? ((%s) > 0 ? 1 : -1) : 0)", recv, recv);
+      else if (strcmp(method, "nan?") == 0)
+        r = sfmt("(isnan(%s) ? TRUE : FALSE)", recv);
+      else if (strcmp(method, "itself") == 0)
+        r = sfmt("%s", recv);
+      else if (strcmp(method, "to_s") == 0)
+        r = sfmt("sp_float_to_s(%s)", recv);
+      else if (strcmp(method, "clamp") == 0 && call->arguments &&
+           call->arguments->arguments.size == 2) {
+        char *lo = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+        char *hi = codegen_expr(ctx, call->arguments->arguments.nodes[1]);
+        r = sfmt("((%s) < (%s) ? (%s) : (%s) > (%s) ? (%s) : (%s))", recv, lo, lo, recv, hi, hi, recv);
+        free(lo); free(hi);
       }
       if (r) { free(recv); free(method); return r; }
       free(recv);

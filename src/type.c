@@ -477,8 +477,17 @@ vtype_t infer_type(codegen_ctx_t *ctx, pm_node_t *node) {
         if (strcmp(method, "include?") == 0) { free(method); return vt_prim(SPINEL_TYPE_BOOLEAN); }
         if (strcmp(method, "each") == 0 || strcmp(method, "each_with_index") == 0) { free(method); return vt_prim(SPINEL_TYPE_ARRAY); }
         if (strcmp(method, "join") == 0) { free(method); return vt_prim(SPINEL_TYPE_STRING); }
-        if (strcmp(method, "any?") == 0) { free(method); return vt_prim(SPINEL_TYPE_BOOLEAN); }
-        if (strcmp(method, "find") == 0) { free(method); return vt_prim(SPINEL_TYPE_INTEGER); }
+        if (strcmp(method, "any?") == 0 || strcmp(method, "all?") == 0 ||
+          strcmp(method, "none?") == 0 || strcmp(method, "empty?") == 0) {
+          free(method); return vt_prim(SPINEL_TYPE_BOOLEAN);
+        }
+        if (strcmp(method, "find") == 0 || strcmp(method, "detect") == 0) { free(method); return vt_prim(SPINEL_TYPE_INTEGER); }
+        if (strcmp(method, "index") == 0 || strcmp(method, "find_index") == 0 ||
+          strcmp(method, "delete") == 0 || strcmp(method, "delete_at") == 0 ||
+          strcmp(method, "sample") == 0) { free(method); return vt_prim(SPINEL_TYPE_INTEGER); }
+        if (strcmp(method, "+") == 0 || strcmp(method, "-") == 0 ||
+          strcmp(method, "take") == 0 || strcmp(method, "drop") == 0 ||
+          strcmp(method, "collect") == 0) { free(method); return vt_prim(SPINEL_TYPE_ARRAY); }
         if (strcmp(method, "filter_map") == 0 || strcmp(method, "flat_map") == 0) { free(method); return vt_prim(SPINEL_TYPE_ARRAY); }
         if (strcmp(method, "count") == 0 || strcmp(method, "min_by") == 0 ||
           strcmp(method, "max_by") == 0) { free(method); return vt_prim(SPINEL_TYPE_INTEGER); }
@@ -508,8 +517,14 @@ vtype_t infer_type(codegen_ctx_t *ctx, pm_node_t *node) {
         if (strcmp(method, "each") == 0) { free(method); return vt_prim(SPINEL_TYPE_HASH); }
         if (strcmp(method, "keys") == 0) { free(method); return vt_prim(SPINEL_TYPE_ARRAY); }
         if (strcmp(method, "values") == 0) { free(method); return vt_prim(SPINEL_TYPE_ARRAY); }
-        if (strcmp(method, "merge") == 0) { free(method); return vt_prim(SPINEL_TYPE_HASH); }
+        if (strcmp(method, "merge") == 0 || strcmp(method, "clear") == 0) { free(method); return vt_prim(SPINEL_TYPE_HASH); }
         if (strcmp(method, "transform_values") == 0) { free(method); return vt_prim(SPINEL_TYPE_HASH); }
+        if (strcmp(method, "empty?") == 0 || strcmp(method, "include?") == 0 ||
+          strcmp(method, "member?") == 0) { free(method); return vt_prim(SPINEL_TYPE_BOOLEAN); }
+        if (strcmp(method, "count") == 0 || strcmp(method, "size") == 0 ||
+          strcmp(method, "store") == 0 || strcmp(method, "fetch") == 0) {
+          free(method); return vt_prim(SPINEL_TYPE_INTEGER);
+        }
       }
       /* sp_RbHash methods (heterogeneous hash) */
       if (recv_t.kind == SPINEL_TYPE_RB_HASH) {
@@ -520,6 +535,10 @@ vtype_t infer_type(codegen_ctx_t *ctx, pm_node_t *node) {
         if (strcmp(method, "has_key?") == 0 || strcmp(method, "key?") == 0) { free(method); return vt_prim(SPINEL_TYPE_BOOLEAN); }
         if (strcmp(method, "merge") == 0) { free(method); return vt_prim(SPINEL_TYPE_RB_HASH); }
         if (strcmp(method, "transform_values") == 0) { free(method); return vt_prim(SPINEL_TYPE_RB_HASH); }
+        if (strcmp(method, "empty?") == 0 || strcmp(method, "include?") == 0 ||
+          strcmp(method, "member?") == 0) { free(method); return vt_prim(SPINEL_TYPE_BOOLEAN); }
+        if (strcmp(method, "count") == 0 || strcmp(method, "size") == 0 ||
+          strcmp(method, "fetch") == 0) { free(method); return vt_prim(SPINEL_TYPE_INTEGER); }
       }
       /* String methods */
       if (recv_t.kind == SPINEL_TYPE_STRING) {
@@ -554,7 +573,16 @@ vtype_t infer_type(codegen_ctx_t *ctx, pm_node_t *node) {
         if (strcmp(method, "frozen?") == 0) { free(method); return vt_prim(SPINEL_TYPE_BOOLEAN); }
         if (strcmp(method, "chars") == 0) { free(method); return vt_prim(SPINEL_TYPE_STR_ARRAY); }
         if (strcmp(method, "bytes") == 0) { ctx->needs_intarray = ctx->needs_gc = true; free(method); return vt_prim(SPINEL_TYPE_ARRAY); }
-        if (strcmp(method, "hex") == 0 || strcmp(method, "oct") == 0) { free(method); return vt_prim(SPINEL_TYPE_INTEGER); }
+        if (strcmp(method, "hex") == 0 || strcmp(method, "oct") == 0 ||
+          strcmp(method, "index") == 0 || strcmp(method, "rindex") == 0 ||
+          strcmp(method, "getbyte") == 0 || strcmp(method, "setbyte") == 0 ||
+          strcmp(method, "bytesize") == 0) { free(method); return vt_prim(SPINEL_TYPE_INTEGER); }
+        if (strcmp(method, "chop") == 0 || strcmp(method, "swapcase") == 0 ||
+          strcmp(method, "concat") == 0 || strcmp(method, "encode") == 0 ||
+          strcmp(method, "b") == 0 || strcmp(method, "intern") == 0) {
+          free(method); return vt_prim(SPINEL_TYPE_STRING);
+        }
+        if (strcmp(method, "ascii_only?") == 0) { free(method); return vt_prim(SPINEL_TYPE_BOOLEAN); }
         if (strcmp(method, "getbyte") == 0 || strcmp(method, "bytesize") == 0) { free(method); return vt_prim(SPINEL_TYPE_INTEGER); }
       }
       /* sp_String (mutable string) methods */
@@ -660,11 +688,22 @@ vtype_t infer_type(codegen_ctx_t *ctx, pm_node_t *node) {
       /* Numeric methods */
       if (recv_t.kind == SPINEL_TYPE_INTEGER) {
         if (strcmp(method, "abs") == 0 || strcmp(method, "clamp") == 0 ||
-          strcmp(method, "succ") == 0) { free(method); return vt_prim(SPINEL_TYPE_INTEGER); }
+          strcmp(method, "succ") == 0 || strcmp(method, "next") == 0 ||
+          strcmp(method, "pred") == 0 || strcmp(method, "itself") == 0 ||
+          strcmp(method, "to_i") == 0 || strcmp(method, "to_int") == 0 ||
+          strcmp(method, "floor") == 0 || strcmp(method, "ceil") == 0 ||
+          strcmp(method, "round") == 0 || strcmp(method, "truncate") == 0 ||
+          strcmp(method, "ord") == 0 || strcmp(method, "gcd") == 0 ||
+          strcmp(method, "lcm") == 0 || strcmp(method, "bit_length") == 0 ||
+          strcmp(method, "pow") == 0 || strcmp(method, "[]") == 0 ||
+          strcmp(method, "**") == 0) {
+          free(method); return vt_prim(SPINEL_TYPE_INTEGER);
+        }
+        if (strcmp(method, "to_f") == 0) { free(method); return vt_prim(SPINEL_TYPE_FLOAT); }
+        if (strcmp(method, "to_s") == 0) { free(method); return vt_prim(SPINEL_TYPE_STRING); }
         if (strcmp(method, "even?") == 0 || strcmp(method, "odd?") == 0 ||
           strcmp(method, "zero?") == 0 || strcmp(method, "positive?") == 0 ||
           strcmp(method, "negative?") == 0) { free(method); return vt_prim(SPINEL_TYPE_BOOLEAN); }
-        if (strcmp(method, "**") == 0) { free(method); return vt_prim(SPINEL_TYPE_INTEGER); }
       }
       /* Universal methods */
       if (strcmp(method, "nil?") == 0 || strcmp(method, "is_a?") == 0 ||
@@ -672,10 +711,20 @@ vtype_t infer_type(codegen_ctx_t *ctx, pm_node_t *node) {
         free(method); return vt_prim(SPINEL_TYPE_BOOLEAN);
       }
       if (recv_t.kind == SPINEL_TYPE_FLOAT) {
-        if (strcmp(method, "abs") == 0) { free(method); return vt_prim(SPINEL_TYPE_FLOAT); }
+        if (strcmp(method, "abs") == 0 || strcmp(method, "itself") == 0 ||
+          strcmp(method, "to_f") == 0 || strcmp(method, "clamp") == 0) {
+          free(method); return vt_prim(SPINEL_TYPE_FLOAT);
+        }
         if (strcmp(method, "ceil") == 0 || strcmp(method, "floor") == 0 ||
-          strcmp(method, "round") == 0 || strcmp(method, "to_i") == 0) {
+          strcmp(method, "round") == 0 || strcmp(method, "to_i") == 0 ||
+          strcmp(method, "truncate") == 0) {
           free(method); return vt_prim(SPINEL_TYPE_INTEGER);
+        }
+        if (strcmp(method, "to_s") == 0) { free(method); return vt_prim(SPINEL_TYPE_STRING); }
+        if (strcmp(method, "zero?") == 0 || strcmp(method, "positive?") == 0 ||
+          strcmp(method, "negative?") == 0 || strcmp(method, "infinite?") == 0 ||
+          strcmp(method, "nan?") == 0) {
+          free(method); return vt_prim(SPINEL_TYPE_BOOLEAN);
         }
       }
       /* Extension methods on built-in types (open class support) */
