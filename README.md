@@ -1,160 +1,200 @@
-# Spinel — AOT Compiler for Ruby
+# Spinel -- Ruby AOT Compiler
 
-Spinel compiles Ruby source code to standalone C executables via
-[Prism](https://github.com/ruby/prism) parsing and whole-program type inference.
+Spinel compiles Ruby source code into standalone C executables.
+It parses Ruby with [Prism](https://github.com/ruby/prism),
+performs whole-program type inference, and generates a single C file
+that compiles to a native binary with no runtime dependencies.
 
-- **Monomorphic code** (statically typed): classes → C structs, methods → direct C calls,
-  arithmetic → native C operators. 20-57x faster than CRuby.
-- **Polymorphic code** (dynamically typed): 8-byte NaN-boxed values with 3-tier dispatch
-  (monomorphic → bimorphic inline switch → megamorphic dispatch function).
-- **No runtime dependencies**: generated binaries need only libc and libm.
-  Mark-and-sweep GC is generated inline. Regexp programs link with libonig.
+```
+Ruby (.rb) --> Prism AST --> Type Inference --> C Source --> Native Binary
+```
 
-~12200 lines of C. 54 test programs. 53/53 automated tests pass.
+## Features
+
+- **Fast**: 10x--200x faster than CRuby on computation-heavy benchmarks
+- **Small**: generated binaries are 15--20 KB, needing only libc + libm
+- **Single file output**: one `.c` file, one `cc` invocation
+- **No runtime**: no VM, no interpreter, no mruby -- pure AOT compilation
+- **Mark-and-sweep GC**: generated inline, only when needed
+- **Polymorphism**: NaN-boxed 8-byte values with 3-tier dispatch
 
 ## Quick Start
 
 ```bash
-# Build the compiler
-make deps && make
+make deps    # fetch and build Prism
+make         # build the spinel compiler
 
-# Compile a Ruby program
-./spinel --source=app.rb --output=app.c
-cc -O2 app.c -lm -o app
-
-# Run the full test suite
-make test-all
+./spinel --source=hello.rb --output=hello.c
+cc -O2 hello.c -lm -o hello
+./hello
 ```
 
-The generated C file includes a comment with the exact compile command.
+Programs using regular expressions need `-lonig` (oniguruma).
 
 ## Benchmarks
 
-| Benchmark | CRuby 3.2 | mruby | **Spinel AOT** | Speedup |
-|-----------|-----------|-------|----------------|---------|
-| mandelbrot (600x600) | 1.14s | 3.18s | **0.02s** | **57x** |
-| ao_render (64x64 AO) | 3.55s | 13.69s | **0.07s** | **51x** |
-| so_lists (300x10K) | 0.44s | 2.01s | **0.02s** | **22x** |
-| fib(34) recursive | 0.55s | 2.78s | **0.01s** | **55x** |
-| lc_fizzbuzz (Church) | 28.96s | — | **1.55s** | **19x** |
+Measured on Linux x86_64 (best of 3 runs):
 
-## How It Works
+| Benchmark | Spinel | CRuby 3.x | Speedup | Spinel RSS |
+|-----------|--------|-----------|---------|-----------|
+| life (Game of Life) | 7 ms | 1,462 ms | **208x** | 7 MB |
+| nested_loop | 2 ms | 332 ms | **179x** | 1 MB |
+| spectralnorm | 15 ms | 1,024 ms | **69x** | 2 MB |
+| ackermann | 6 ms | 389 ms | **67x** | 1 MB |
+| mandelbrot | 25 ms | 1,150 ms | **47x** | 1 MB |
+| fib(34) | 12 ms | 560 ms | **48x** | 1 MB |
+| nqueens | 727 ms | 24,833 ms | **34x** | 2 MB |
+| sudoku | 6 ms | 150 ms | **25x** | 3 MB |
+| matmul | 4 ms | 323 ms | **77x** | 2 MB |
+| splay | 13 ms | 236 ms | **18x** | 5 MB |
+| partial_sums | 82 ms | 1,270 ms | **16x** | 2 MB |
+| so_lists | 25 ms | 506 ms | **20x** | 2 MB |
+| sieve | 45 ms | 443 ms | **10x** | 35 MB |
 
-```
-Ruby Source (.rb)
-    |
-    v
-Prism (libprism)              -- parse to AST
-    |
-    v
-Pass 1: Class Analysis        -- classes, modules, inheritance, mixins,
-    |                            attr_accessor, Struct.new, yield detection,
-    |                            require_relative (multi-file)
-    v
-Pass 2: Type Inference         -- whole-program: variables, ivars, params,
-    |                            returns. Cross-function inference.
-    |                            MONO (single type) vs POLY (union type)
-    v
-Pass 3: Code Generation        -- MONO: classes → C structs, methods → direct calls
-    |                            POLY: sp_RbValue (8B NaN-boxed), 3-tier dispatch
-    |                            Closures, blocks, regexp, exceptions
-    v
-Standalone C file              -- GC inline, exception handling inline
-    |
-    v
-cc -O2 -lm → native binary
-```
+60 tests and 39 benchmarks pass.
 
-## Supported Language Features
+## Supported Ruby Features
 
-| Category | Features |
-|----------|----------|
-| **OOP** | Classes, inheritance (`< Parent`), `super`, `include` (mixin), `attr_accessor`/`reader`/`writer`, class methods (`def self.foo`), `Struct.new` (incl. `keyword_init: true`), `alias`, `Comparable` (operator methods), module constants (`Module::CONST`) |
-| **Blocks & Closures** | `yield`, `block_given?`, `&block`, `proc {}`, `Proc.new`, `Proc#call`, `method(:name)`, `Array#each/map/select/reject/reduce/count/sort_by/min_by/max_by`, `Hash#each`, `Integer#times/upto/downto`, lambda `-> x { }`, `Enumerable` |
-| **Control Flow** | `if`/`elsif`/`else`, `unless`, `case`/`when`, **`case`/`in` (pattern matching)**, `while`, `until`, `loop`, `for..in`, `break`, `next`, `return`, `catch`/`throw`, ternary, `and`/`or`/`not`, `&.` (safe navigation) |
-| **Exceptions** | `begin`/`rescue`/`ensure`/`retry`, `raise "msg"`, `raise ClassName, "msg"`, `rescue ClassName => e` (class hierarchy), custom exception classes |
-| **Parameters** | Positional, default values, keyword (`name:, greeting: "Hello"`), rest/splat (`*args`) |
-| **Polymorphism** | Variables holding multiple types, heterogeneous arrays `[1, "two", 3.0]`, heterogeneous Hash `{name: "Alice", age: 30}`, duck typing (bimorphic + megamorphic dispatch), `case/in` pattern matching |
-| **Types** | Integer, Float, Boolean, String (immutable `const char *` + mutable `sp_String`), Symbol, nil, Range, Time |
-| **Collections** | Integer arrays (push/pop/shift/sort/sort\_by/min/max/min\_by/max\_by/sum/reduce/count/join/uniq), Hash (String→Int, heterogeneous), String arrays (split results, count/find/any?/max\_by/filter\_map) |
-| **Strings** | 35+ methods: length, upcase, downcase, strip, lstrip, rstrip, reverse, gsub, sub, split, capitalize, chomp, include?, start\_with?, end\_with?, count, ljust, rjust, center, tr, delete, squeeze, chars, bytes, to\_f, to\_i, hex, oct, slice, dup, freeze, frozen?, `+`, `<<`, `*`, `[]`, `[range]`, replace, clear, comparison (`==`/`<`) |
-| **Regexp** | `/pattern/`, `=~`, `$1`-`$9`, `match?`, `gsub`, `sub`, `scan`, `split` (via oniguruma) |
-| **Numeric** | `abs`, `even?`, `odd?`, `zero?`, `positive?`, `negative?`, `ceil`, `floor`, `round`, `**`, `to_f`, `to_i`, `to_s` |
-| **I/O** | `puts`/`print`/`printf`/`putc`/`p`, `File.read/write/exist?/delete/open(block)`, `ARGV`, `$stderr.puts`, `exit`, `sleep` |
-| **Introspection** | `is_a?` (compile-time), `respond_to?` (compile-time), `nil?`, `defined?`, `__LINE__`, `__FILE__`, `__method__`, `freeze`/`frozen?` |
-| **Multi-file** | `require_relative` (compile-time file resolution and merging) |
-| **Runtime** | Mark-and-sweep GC (shadow stack), arena allocator (closures), NaN-boxed polymorphic values (8 bytes) |
+### Core Language
+
+Classes, inheritance, `super`, `include` (mixin), `attr_accessor`/`reader`/`writer`,
+class methods, `Struct.new` (with `keyword_init:`), `alias`, `Comparable`,
+module constants, open classes for built-in types.
+
+### Control Flow
+
+`if`/`elsif`/`else`, `unless`, `case`/`when`, `case`/`in` (pattern matching),
+`while`, `until`, `loop`, `for..in`, `break`, `next`, `return`,
+`catch`/`throw`, ternary, `and`/`or`/`not`, `&.` (safe navigation).
+
+### Blocks and Closures
+
+`yield`, `block_given?`, `&block`, `proc {}`, `Proc.new`, `Proc#call`,
+`method(:name)`, lambda `-> x { }` with capture.
+Block methods: `each`, `map`, `select`, `reject`, `reduce`, `find`, `any?`,
+`all?`, `none?`, `count`, `sort_by`, `min_by`, `max_by`, `filter_map`, `flat_map`.
+
+### Exception Handling
+
+`begin`/`rescue`/`ensure`/`retry`, `raise`, custom exception classes,
+`rescue ClassName => e` with class hierarchy checking.
+
+### Parameters
+
+Positional, default values, keyword arguments (`name:`, `greeting: "Hello"`),
+rest/splat (`*args`), block parameters (`&block`).
+
+### Polymorphism
+
+Variables holding multiple types, heterogeneous arrays and hashes,
+duck typing with 3-tier dispatch (monomorphic / bimorphic / megamorphic),
+NaN-boxed 8-byte values.
+
+### Built-in Types
+
+| Type | Implementation | Key Methods |
+|------|---------------|-------------|
+| Integer | `int64_t` (unboxed) | `abs`, `even?`, `odd?`, `gcd`, `lcm`, `bit_length`, `pow`, `clamp`, `times`, `upto`, `downto`, `to_f`, `to_s`, `chr`, `[]` |
+| Float | `double` (unboxed) | `abs`, `ceil`, `floor`, `round`, `truncate`, `infinite?`, `nan?`, `clamp`, `to_i`, `to_s` |
+| String | `const char *` (immutable) | 45+ methods: `length`, `upcase`, `downcase`, `strip`, `gsub`, `sub`, `split`, `index`, `rindex`, `include?`, `start_with?`, `end_with?`, `tr`, `chop`, `swapcase`, `[]`, `slice`, `chars`, `bytes`, `to_i`, `to_f`, ... |
+| sp_String | mutable string | `<<`, `replace`, `clear`, `dup` + all immutable String methods via delegation |
+| Array | `sp_IntArray` (int64) | `push`, `pop`, `shift`, `[]`, `[]=`, `sort`, `reverse`, `uniq`, `map`, `select`, `reject`, `reduce`, `find`, `any?`, `all?`, `none?`, `+`, `-`, `take`, `drop`, `delete`, `sample`, ... |
+| FloatArray | `sp_FloatArray` | `push`, `[]`, `[]=`, `length`, `dup` |
+| Hash | `sp_StrIntHash` | `[]`, `[]=`, `fetch`, `delete`, `keys`, `values`, `each`, `merge`, `transform_values`, `empty?`, `include?`, `clear` |
+| Range | `sp_Range` | `first`, `last`, `each`, `include?`, `to_a`, `sum`, `map` |
+| Regexp | oniguruma | `/pattern/`, `=~`, `$1`--`$9`, `match?`, `gsub`, `sub`, `scan`, `split` |
+| Time | `time_t` wrapper | `Time.now`, `Time.at`, `to_i`, arithmetic |
+| StringIO | inline C | `read`, `write`, `puts`, `gets`, `string`, `pos`, `seek`, `eof?`, ... |
+| File | inline C | `File.read`, `File.write`, `File.exist?`, `File.open { ... }`, `File.join`, ... |
+
+Method tables in `src/methods.c` serve as single source of truth for
+type inference, `respond_to?` resolution, and argument type information.
+
+### I/O and System
+
+`puts`, `print`, `printf`, `p`, `gets`, `ARGV`, `ENV[]`,
+`system()`, backtick, `exit`, `sleep`, `$stdin`, `$stdout`, `$stderr`.
+
+### Introspection
+
+`is_a?` (compile-time), `respond_to?` (compile-time for monomorphic,
+runtime type-tag dispatch for polymorphic), `nil?`, `defined?`,
+`__LINE__`, `__FILE__`, `__method__`.
+
+### Multi-file
+
+`require_relative` resolves files at compile time.
+`require "name"` searches `lib/` paths for stub libraries.
 
 ## Architecture
 
-### 3-Tier Method Dispatch
+```
+src/
+  main.c       -- CLI, file I/O, Prism setup
+  codegen.h    -- type system, struct definitions, shared API
+  codegen.c    -- orchestrator, class analysis, lambda, require
+  methods.c    -- built-in method tables (return types, arg types)
+  type.c       -- type inference and resolution
+  expr.c       -- expression code generation
+  stmt.c       -- statement code generation
+  emit.c       -- C code emission (headers, structs, runtime helpers)
 
-| Polymorphism | Strategy | Speed |
-|-------------|----------|-------|
-| Monomorphic (1 type) | Direct C function call | Fastest |
-| Bimorphic (2 types) | Inline if/else at call site | Fast |
-| Megamorphic (3+ types) | Per-method dispatch function | Good |
+lib/           -- stub libraries for require resolution
+  stringio.rb/c, strscan.rb/c, optparse.rb, erb.rb, set.rb, forwardable.rb
 
-### NaN-boxing (8-byte values)
+test/          -- 60 test programs (automated)
+benchmark/     -- 39 benchmark programs
+vendor/prism/  -- Prism parser (fetched by make deps)
+```
 
-Polymorphic values use favor-pointer NaN-boxing:
-- Pointer: zero-cost extract (raw 48-bit address)
-- Integer: shift + mask (48-bit signed, ±140 trillion)
-- Double: subtract offset + bitcast
-- Bool/Nil: special constants
+### Compilation Passes
 
-Monomorphic code uses unboxed C types — zero overhead.
+1. **Require resolution** -- parse required files, merge ASTs
+2. **Class analysis** -- classes, modules, inheritance, mixins, Struct, open classes
+3. **Type inference** -- whole-program: variables, ivars, params, returns
+4. **Needs detection** -- scan for used types, emit only required runtime helpers
+5. **Code emission** -- C structs, method functions, GC, exception handling
+6. **Top-level codegen** -- main() with variable declarations and statements
 
-## Test Suite
+### Generated Code Style
+
+- 2-space indentation
+- Newline before `else`
+- Only used runtime helpers are emitted (unused types produce zero code)
+- `puts "hello"` generates 61 lines of C
+
+## Library Support
+
+Spinel includes stub libraries for commonly-used gems:
+
+| Library | Status |
+|---------|--------|
+| stringio | Built-in type (full API) |
+| strscan | Ruby stub + C implementation |
+| optparse | Minimal pure-Ruby implementation |
+| erb | Placeholder (eval-based ERB is AOT-incompatible) |
+| set | Array-backed approximation |
+| forwardable | Compile-time delegation |
+
+Pure Ruby libraries work via `--lib=DIR` search paths.
+
+## Limitations
+
+- **No eval**: `eval`, `instance_eval`, `class_eval` are not supported
+- **No metaprogramming**: `send`, `method_missing`, `define_method` (dynamic names)
+- **No threads**: `Thread`, `Fiber`, `Mutex`
+- **No encoding**: assumes UTF-8 / ASCII throughout
+- **No ObjectSpace**: no runtime heap introspection
+
+## Building
 
 ```bash
-make test-all    # 53 tests, all pass
-make test        # quick: mandelbrot only
+make deps      # fetch and build Prism (one-time)
+make           # build spinel compiler
+make test-all  # run 60 tests
+make bench-verify  # verify 39 benchmarks produce correct output
 ```
-
-## Project Structure
-
-```
-spinel/
-├── src/
-│   ├── main.c          # CLI, file reading, Prism parsing, require resolution
-│   ├── codegen.h       # Type system, class/method/module info structs, shared declarations
-│   ├── codegen.c       # Orchestrator, utilities, class analysis, lambda, require
-│   ├── type.c          # Type inference and resolution
-│   ├── expr.c          # Expression code generation
-│   ├── stmt.c          # Statement code generation
-│   └── emit.c          # C code emission (header, structs, methods)
-├── examples/           # 54 test programs (53 automated)
-├── prototype/
-│   └── tools/          # RBS extraction, LumiTrace prototype tools
-├── Makefile            # build, test, test-all
-├── PLAN.md             # Implementation roadmap & design docs
-└── ruby_aot_compiler_design.md
-```
-
-## Dependencies
-
-- **Build time**: [Prism](https://github.com/ruby/prism) (fetched automatically by `make deps`)
-- **Run time**: None for most programs. libc + libm only.
-- **Regexp**: Programs using regex require [oniguruma](https://github.com/kkos/oniguruma) (`-lonig`).
 
 ## License
 
-Spinel is released under the [MIT License](LICENSE).
-
-### Note on License
-
-mruby has chosen a MIT License due to its permissive license allowing
-developers to target various environments such as embedded systems.
-However, the license requires the display of the copyright notice and license
-information in manuals for instance. Doing so for big projects can be
-complicated or troublesome. This is why mruby has decided to display "mruby
-developers" as the copyright name to make it simple conventionally.
-In the future, mruby might ask you to distribute your new code
-(that you will commit,) under the MIT License as a member of
-"mruby developers" but contributors will keep their copyright.
-(We did not intend for contributors to transfer or waive their copyrights,
-actual copyright holder name (contributors) will be listed in the [AUTHORS](AUTHORS)
-file.)
-
-Please ask us if you want to distribute your code under another license.
+MIT License. See [LICENSE](LICENSE) for details.
