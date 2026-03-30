@@ -1460,6 +1460,20 @@ class Compiler
     end
     if mname == "map"
       if recv >= 0
+        # Check block body return type to determine result array type
+        blk = @nd_block[nid]
+        if blk >= 0
+          bbody = @nd_body[blk]
+          if bbody >= 0
+            bbs = get_stmts(bbody)
+            if bbs.length > 0
+              bret = infer_type(bbs[bbs.length - 1])
+              if bret == "string"
+                return "str_array"
+              end
+            end
+          end
+        end
         return infer_type(recv)
       end
       return "int_array"
@@ -1493,6 +1507,9 @@ class Compiler
         end
         if rt == "argv"
           return "string"
+        end
+        if rt == "lambda"
+          return "lambda"
         end
       end
       return "int"
@@ -1853,6 +1870,9 @@ class Compiler
     if t == "str_str_hash"
       return 1
     end
+    if t == "lambda"
+      return 1
+    end
     if is_obj_type(t) == 1
       return 1
     end
@@ -2078,6 +2098,9 @@ class Compiler
       end
       i = i + 1
     end
+
+    # Pass 2.5: infer lambda parameter types from call sites
+    infer_lambda_param_types
 
     # Pass 3: infer return types
     infer_all_returns
@@ -4033,6 +4056,305 @@ class Compiler
     end
   end
 
+  def infer_lambda_param_types
+    # Scan all call sites in the program AST for calls to top-level methods
+    # where lambda arguments are passed. Update param types accordingly.
+    scan_lambda_call_sites(@root_id)
+    # Second pass: scan method bodies for parameters used as lambda receivers
+    # or passed to functions that expect lambda args (transitive closure)
+    changed = 1
+    while changed == 1
+      changed = 0
+      mi = 0
+      while mi < @meth_names.length
+        bid = @meth_body_ids[mi]
+        if bid >= 0
+          pnames = @meth_param_names[mi].split(",")
+          ptypes = @meth_param_types[mi].split(",")
+          pk = 0
+          while pk < pnames.length
+            if pk < ptypes.length
+              if ptypes[pk] != "lambda"
+                # Check if param is used as lambda receiver (e.g., param[...])
+                # or passed to a function that expects lambda
+                if param_used_as_lambda(pnames[pk], bid) == 1
+                  ptypes[pk] = "lambda"
+                  changed = 1
+                end
+              end
+            end
+            pk = pk + 1
+          end
+          @meth_param_types[mi] = ptypes.join(",")
+        end
+        mi = mi + 1
+      end
+    end
+  end
+
+  def param_used_as_lambda(pname, nid)
+    if nid < 0
+      return 0
+    end
+    t = @nd_type[nid]
+    # Handle StatementsNode by iterating its statements
+    if t == "StatementsNode"
+      stmts2 = parse_id_list(@nd_stmts[nid])
+      k = 0
+      while k < stmts2.length
+        if param_used_as_lambda(pname, stmts2[k]) == 1
+          return 1
+        end
+        k = k + 1
+      end
+      return 0
+    end
+    if t == "CallNode"
+      mname = @nd_name[nid]
+      recv = @nd_receiver[nid]
+      # Check if param is used as receiver of [] with a lambda argument
+      # (distinguishes lambda call from array indexing)
+      if mname == "[]"
+        if recv >= 0
+          if @nd_type[recv] == "LocalVariableReadNode"
+            if @nd_name[recv] == pname
+              # Only flag as lambda if the argument is a lambda
+              args_id5 = @nd_arguments[nid]
+              if args_id5 >= 0
+                aargs5 = get_args(args_id5)
+                if aargs5.length > 0
+                  if infer_type(aargs5[0]) == "lambda"
+                    return 1
+                  end
+                end
+              end
+            end
+          end
+          # Check if param is passed as argument to [] on a lambda receiver
+          rt = infer_type(recv)
+          if rt == "lambda"
+            args_id3 = @nd_arguments[nid]
+            if args_id3 >= 0
+              aargs3 = get_args(args_id3)
+              k3 = 0
+              while k3 < aargs3.length
+                if @nd_type[aargs3[k3]] == "LocalVariableReadNode"
+                  if @nd_name[aargs3[k3]] == pname
+                    return 1
+                  end
+                end
+                k3 = k3 + 1
+              end
+            end
+          end
+        end
+      end
+      # Check if param is passed to a function that expects lambda
+      if recv < 0
+        fmi = find_method_idx(mname)
+        if fmi >= 0
+          fptypes = @meth_param_types[fmi].split(",")
+          args_id = @nd_arguments[nid]
+          if args_id >= 0
+            aargs = get_args(args_id)
+            k = 0
+            while k < aargs.length
+              if k < fptypes.length
+                if fptypes[k] == "lambda"
+                  if @nd_type[aargs[k]] == "LocalVariableReadNode"
+                    if @nd_name[aargs[k]] == pname
+                      return 1
+                    end
+                  end
+                end
+              end
+              k = k + 1
+            end
+          end
+        end
+      end
+    end
+    # Recurse into children
+    if @nd_body[nid] >= 0
+      bstmts = get_stmts(@nd_body[nid])
+      if bstmts.length > 0
+        k = 0
+        while k < bstmts.length
+          if param_used_as_lambda(pname, bstmts[k]) == 1
+            return 1
+          end
+          k = k + 1
+        end
+      else
+        if param_used_as_lambda(pname, @nd_body[nid]) == 1
+          return 1
+        end
+      end
+    end
+    if @nd_receiver[nid] >= 0
+      if param_used_as_lambda(pname, @nd_receiver[nid]) == 1
+        return 1
+      end
+    end
+    if @nd_arguments[nid] >= 0
+      aargs2 = get_args(@nd_arguments[nid])
+      k = 0
+      while k < aargs2.length
+        if param_used_as_lambda(pname, aargs2[k]) == 1
+          return 1
+        end
+        k = k + 1
+      end
+    end
+    if @nd_expression[nid] >= 0
+      if param_used_as_lambda(pname, @nd_expression[nid]) == 1
+        return 1
+      end
+    end
+    if @nd_predicate[nid] >= 0
+      if param_used_as_lambda(pname, @nd_predicate[nid]) == 1
+        return 1
+      end
+    end
+    if @nd_subsequent[nid] >= 0
+      if param_used_as_lambda(pname, @nd_subsequent[nid]) == 1
+        return 1
+      end
+    end
+    if @nd_else_clause[nid] >= 0
+      if param_used_as_lambda(pname, @nd_else_clause[nid]) == 1
+        return 1
+      end
+    end
+    if @nd_left[nid] >= 0
+      if param_used_as_lambda(pname, @nd_left[nid]) == 1
+        return 1
+      end
+    end
+    if @nd_right[nid] >= 0
+      if param_used_as_lambda(pname, @nd_right[nid]) == 1
+        return 1
+      end
+    end
+    if @nd_block[nid] >= 0
+      if param_used_as_lambda(pname, @nd_block[nid]) == 1
+        return 1
+      end
+    end
+    # Check StatementsNode stmts
+    stmts3 = parse_id_list(@nd_stmts[nid])
+    k3 = 0
+    while k3 < stmts3.length
+      if param_used_as_lambda(pname, stmts3[k3]) == 1
+        return 1
+      end
+      k3 = k3 + 1
+    end
+    0
+  end
+
+  def scan_lambda_call_sites(nid)
+    if nid < 0
+      return
+    end
+    t = @nd_type[nid]
+    if t == "CallNode"
+      mname = @nd_name[nid]
+      recv = @nd_receiver[nid]
+      # Only bare function calls (no receiver) can be top-level methods
+      if recv < 0
+        mi = find_method_idx(mname)
+        if mi >= 0
+          args_id = @nd_arguments[nid]
+          if args_id >= 0
+            aargs = get_args(args_id)
+            ptypes = @meth_param_types[mi].split(",")
+            changed = 0
+            k = 0
+            while k < aargs.length
+              if k < ptypes.length
+                at = infer_type(aargs[k])
+                if at == "lambda"
+                  if ptypes[k] != "lambda"
+                    ptypes[k] = "lambda"
+                    changed = 1
+                  end
+                end
+              end
+              k = k + 1
+            end
+            if changed == 1
+              @meth_param_types[mi] = ptypes.join(",")
+            end
+          end
+        end
+      end
+    end
+    # Recurse into children
+    if @nd_body[nid] >= 0
+      bstmts = get_stmts(@nd_body[nid])
+      if bstmts.length > 0
+        k = 0
+        while k < bstmts.length
+          scan_lambda_call_sites(bstmts[k])
+          k = k + 1
+        end
+      else
+        scan_lambda_call_sites(@nd_body[nid])
+      end
+    end
+    if @nd_receiver[nid] >= 0
+      scan_lambda_call_sites(@nd_receiver[nid])
+    end
+    if @nd_arguments[nid] >= 0
+      aargs2 = get_args(@nd_arguments[nid])
+      k = 0
+      while k < aargs2.length
+        scan_lambda_call_sites(aargs2[k])
+        k = k + 1
+      end
+    end
+    if @nd_expression[nid] >= 0
+      scan_lambda_call_sites(@nd_expression[nid])
+    end
+    if @nd_predicate[nid] >= 0
+      scan_lambda_call_sites(@nd_predicate[nid])
+    end
+    if @nd_subsequent[nid] >= 0
+      scan_lambda_call_sites(@nd_subsequent[nid])
+    end
+    if @nd_else_clause[nid] >= 0
+      scan_lambda_call_sites(@nd_else_clause[nid])
+    end
+    if @nd_left[nid] >= 0
+      scan_lambda_call_sites(@nd_left[nid])
+    end
+    if @nd_right[nid] >= 0
+      scan_lambda_call_sites(@nd_right[nid])
+    end
+    if @nd_block[nid] >= 0
+      scan_lambda_call_sites(@nd_block[nid])
+    end
+    elems = parse_id_list(@nd_elements[nid])
+    k = 0
+    while k < elems.length
+      scan_lambda_call_sites(elems[k])
+      k = k + 1
+    end
+    conds = parse_id_list(@nd_conditions[nid])
+    k = 0
+    while k < conds.length
+      scan_lambda_call_sites(conds[k])
+      k = k + 1
+    end
+    stmts2 = parse_id_list(@nd_stmts[nid])
+    k = 0
+    while k < stmts2.length
+      scan_lambda_call_sites(stmts2[k])
+      k = k + 1
+    end
+  end
+
   def infer_all_returns
     # Pre-pass: infer class method param types from body usage
     infer_cls_meth_param_from_body
@@ -4362,6 +4684,171 @@ class Compiler
     ""
   end
 
+  def fix_lambda_return_types
+    # For methods that return "lambda", check if they are called from
+    # contexts that expect primitive types. If so, downgrade the return type.
+    i = 0
+    while i < @meth_names.length
+      if @meth_return_types[i] == "lambda"
+        # Scan call sites to see what type the return value is used as
+        usage = scan_method_return_usage(@meth_names[i], @root_id)
+        if usage == "int"
+          @meth_return_types[i] = "int"
+        end
+        if usage == "bool"
+          @meth_return_types[i] = "bool"
+        end
+        if usage == "string"
+          @meth_return_types[i] = "string"
+        end
+      end
+      i = i + 1
+    end
+  end
+
+  def scan_method_return_usage(mname, nid)
+    if nid < 0
+      return ""
+    end
+    t = @nd_type[nid]
+    if t == "CallNode"
+      cn = @nd_name[nid]
+      recv = @nd_receiver[nid]
+      # Check if this call is our method and its result is used somewhere
+      if recv < 0
+        if cn == mname
+          # This is a call to our method - check parent context
+          # We can't easily check parent here, so check all call sites
+          return ""
+        end
+      end
+      # Check if our method is called as an argument to another call
+      args_id = @nd_arguments[nid]
+      if args_id >= 0
+        aargs = get_args(args_id)
+        k = 0
+        while k < aargs.length
+          aid = aargs[k]
+          if @nd_type[aid] == "CallNode"
+            if @nd_name[aid] == mname
+              if @nd_receiver[aid] < 0
+                # Our method is called as argument - check what the parent expects
+                if cn == "slice"
+                  return "int"
+                end
+                # For until/if/while conditions, need bool
+              end
+            end
+          end
+          k = k + 1
+        end
+      end
+    end
+    # Check if method is called in a negation context (boolean)
+    if t == "CallNode"
+      cn = @nd_name[nid]
+      if cn == "!"
+        recv = @nd_receiver[nid]
+        if recv >= 0
+          if @nd_type[recv] == "CallNode"
+            if @nd_name[recv] == mname
+              if @nd_receiver[recv] < 0
+                return "bool"
+              end
+            end
+          end
+        end
+      end
+    end
+    # Check UntilNode predicate
+    if t == "UntilNode"
+      pred = @nd_predicate[nid]
+      if pred >= 0
+        if @nd_type[pred] == "CallNode"
+          if @nd_name[pred] == mname
+            if @nd_receiver[pred] < 0
+              return "bool"
+            end
+          end
+        end
+      end
+    end
+    # Recurse
+    result = ""
+    if @nd_body[nid] >= 0
+      bstmts = get_stmts(@nd_body[nid])
+      if bstmts.length > 0
+        k = 0
+        while k < bstmts.length
+          r = scan_method_return_usage(mname, bstmts[k])
+          if r != ""
+            result = r
+          end
+          k = k + 1
+        end
+      else
+        r = scan_method_return_usage(mname, @nd_body[nid])
+        if r != ""
+          result = r
+        end
+      end
+    end
+    if @nd_receiver[nid] >= 0
+      r = scan_method_return_usage(mname, @nd_receiver[nid])
+      if r != ""
+        result = r
+      end
+    end
+    if @nd_arguments[nid] >= 0
+      aargs2 = get_args(@nd_arguments[nid])
+      k = 0
+      while k < aargs2.length
+        r = scan_method_return_usage(mname, aargs2[k])
+        if r != ""
+          result = r
+        end
+        k = k + 1
+      end
+    end
+    if @nd_expression[nid] >= 0
+      r = scan_method_return_usage(mname, @nd_expression[nid])
+      if r != ""
+        result = r
+      end
+    end
+    if @nd_predicate[nid] >= 0
+      r = scan_method_return_usage(mname, @nd_predicate[nid])
+      if r != ""
+        result = r
+      end
+    end
+    if @nd_else_clause[nid] >= 0
+      r = scan_method_return_usage(mname, @nd_else_clause[nid])
+      if r != ""
+        result = r
+      end
+    end
+    if @nd_left[nid] >= 0
+      r = scan_method_return_usage(mname, @nd_left[nid])
+      if r != ""
+        result = r
+      end
+    end
+    if @nd_right[nid] >= 0
+      r = scan_method_return_usage(mname, @nd_right[nid])
+      if r != ""
+        result = r
+      end
+    end
+    if @nd_block[nid] >= 0
+      r = scan_method_return_usage(mname, @nd_block[nid])
+      if r != ""
+        result = r
+      end
+    end
+    result
+  end
+
   # ---- Feature detection ----
   def detect_features
     # Set up a temporary scope with main-level locals so feature detection
@@ -4490,6 +4977,9 @@ class Compiler
         @needs_string_helpers = 1
       end
       if mname == "chomp"
+        @needs_string_helpers = 1
+      end
+      if mname == "slice"
         @needs_string_helpers = 1
       end
       if mname == "include?"
@@ -5256,6 +5746,8 @@ class Compiler
     infer_ivar_types_from_writers
     # Re-infer again with updated ivar types
     infer_all_returns
+    # Fix lambda return types based on call-site usage
+    fix_lambda_return_types
     detect_features
     generate_code
   end
@@ -5340,6 +5832,8 @@ class Compiler
     emit_gc_scan_functions
     emit_forward_decls
     emit_global_constants
+    # Lambda functions will be inserted here (before class/toplevel methods)
+    @lambda_insert_pos = @out.length
     emit_class_methods
     emit_toplevel_methods
     # Emit lambda functions before main (they are generated during compilation)
@@ -6611,6 +7105,17 @@ class Compiler
       end
       j = j + 1
     end
+    # Third pass: upgrade locals passed to lambda-param functions
+    j = 0
+    while j < lnames.length
+      if ltypes[j] == "int"
+        if param_used_as_lambda(lnames[j], bid) == 1
+          ltypes[j] = "lambda"
+          set_var_type(lnames[j], "lambda")
+        end
+      end
+      j = j + 1
+    end
     # Emit declarations and GC rooting for pointer locals
     has_gc_locals = 0
     j = 0
@@ -6945,8 +7450,6 @@ class Compiler
     emit_raw("typedef struct{const char**data;mrb_int len;}sp_Argv;")
     emit_raw("static sp_Argv sp_argv;")
     emit_raw("")
-    # Lambda functions will be inserted here after main compilation
-    @lambda_insert_pos = @out.length
     emit_raw("int main(int argc,char**argv){")
     if @needs_gc == 1
       emit_raw("  volatile char _sb; sp_gc_stack_bottom = (char*)&_sb;")
@@ -7013,6 +7516,32 @@ class Compiler
           end
         end
         k = k + 1
+      end
+      j = j + 1
+    end
+
+    # Third pass: upgrade locals passed to lambda-param functions
+    j = 0
+    while j < lnames.length
+      if ltypes[j] == "int"
+        # Check all main-level statements for lambda usage
+        i2 = 0
+        while i2 < stmts.length
+          sid2 = stmts[i2]
+          if @nd_type[sid2] != "DefNode"
+            if @nd_type[sid2] != "ClassNode"
+              if @nd_type[sid2] != "ConstantWriteNode"
+                if @nd_type[sid2] != "ModuleNode"
+                  if param_used_as_lambda(lnames[j], sid2) == 1
+                    ltypes[j] = "lambda"
+                    set_var_type(lnames[j], "lambda")
+                  end
+                end
+              end
+            end
+          end
+          i2 = i2 + 1
+        end
       end
       j = j + 1
     end
@@ -7842,7 +8371,8 @@ class Compiler
           if args_id >= 0
             aargs = get_args(args_id)
             if aargs.length > 0
-              return "sp_lam_call(" + rc + ", " + compile_expr(aargs[0]) + ")"
+              ac = wrap_as_sp_val(aargs[0])
+              return "sp_lam_call(" + rc + ", " + ac + ")"
             end
           end
           return "sp_lam_call(" + rc + ", &sp_lam_nil_val)"
@@ -7852,7 +8382,8 @@ class Compiler
           if args_id >= 0
             aargs = get_args(args_id)
             if aargs.length > 0
-              return "sp_lam_call(" + rc + ", " + compile_expr(aargs[0]) + ")"
+              ac = wrap_as_sp_val(aargs[0])
+              return "sp_lam_call(" + rc + ", " + ac + ")"
             end
           end
           return "sp_lam_call(" + rc + ", &sp_lam_nil_val)"
@@ -8589,7 +9120,11 @@ class Compiler
       end
       if mname == "join"
         @needs_string_helpers = 1
-        return "sp_IntArray_join(" + rc + ", " + compile_arg0(nid) + ")"
+        jarg = compile_arg0(nid)
+        if jarg == "0"
+          jarg = "\"\""
+        end
+        return "sp_IntArray_join(" + rc + ", " + jarg + ")"
       end
       if mname == "reverse"
         return "({ sp_IntArray *_r = sp_IntArray_dup(" + rc + "); sp_IntArray_reverse_bang(_r); _r; })"
@@ -8751,7 +9286,11 @@ class Compiler
       end
       if mname == "join"
         @needs_string_helpers = 1
-        return "sp_StrArray_join(" + rc + ", " + compile_arg0(nid) + ")"
+        jarg = compile_arg0(nid)
+        if jarg == "0"
+          jarg = "\"\""
+        end
+        return "sp_StrArray_join(" + rc + ", " + jarg + ")"
       end
       if mname == "push"
         return "(sp_StrArray_push(" + rc + ", " + compile_arg0(nid) + "), 0)"
@@ -10575,7 +11114,22 @@ class Compiler
         rt = infer_type(recv)
         rc = compile_expr(recv)
         if rt == "int_array"
-          emit("  sp_IntArray_push(" + rc + ", " + compile_arg0(nid) + ");")
+          av = compile_arg0(nid)
+          # If pushing a lambda value, cast to mrb_int
+          a0id = -1
+          args_id2 = @nd_arguments[nid]
+          if args_id2 >= 0
+            aargs2 = get_args(args_id2)
+            if aargs2.length > 0
+              a0id = aargs2[0]
+            end
+          end
+          if a0id >= 0
+            if infer_type(a0id) == "lambda"
+              av = "(mrb_int)" + av
+            end
+          end
+          emit("  sp_IntArray_push(" + rc + ", " + av + ");")
           return
         end
         if rt == "str_array"
@@ -11137,6 +11691,14 @@ class Compiler
     if t == "StringNode"
       return "sp_lam_int(0)"
     end
+    if t == "ConstantReadNode"
+      cname = @nd_name[nid]
+      ci = find_const_idx(cname)
+      if ci >= 0
+        return "cst_" + cname
+      end
+      return "&sp_lam_nil_val"
+    end
     if t == "LambdaNode"
       return compile_lambda_expr(nid)
     end
@@ -11227,6 +11789,24 @@ class Compiler
       return "(" + pred + " ? " + bexpr + " : " + eexpr + ")"
     end
     "&sp_lam_nil_val"
+  end
+
+  def wrap_as_sp_val(nid)
+    at = infer_type(nid)
+    if at == "lambda"
+      return compile_expr(nid)
+    end
+    if at == "int"
+      return "sp_lam_int(" + compile_expr(nid) + ")"
+    end
+    if at == "bool"
+      return "sp_lam_bool(" + compile_expr(nid) + ")"
+    end
+    if @nd_type[nid] == "NilNode"
+      return "&sp_lam_nil_val"
+    end
+    # Default: try to compile as expression
+    compile_expr(nid)
   end
 
   def compile_lambda_expr(nid)
@@ -11484,7 +12064,15 @@ class Compiler
                   emit("  printf(\"%lld\\n\", (long long)(mrb_int)" + val + ");")
                 end
               else
-                emit("  printf(\"%lld\\n\", (long long)" + val + ");")
+                if at == "str_array"
+                  emit("  { sp_StrArray *_pa = " + val + "; for (mrb_int _pi = 0; _pi < _pa->len; _pi++) puts(_pa->data[_pi]); }")
+                else
+                  if at == "int_array"
+                    emit("  { sp_IntArray *_pa = " + val + "; for (mrb_int _pi = 0; _pi < _pa->len; _pi++) printf(\"%lld\\n\", (long long)_pa->data[_pa->start + _pi]); }")
+                  else
+                    emit("  printf(\"%lld\\n\", (long long)" + val + ");")
+                  end
+                end
               end
             end
           end
@@ -11704,13 +12292,12 @@ class Compiler
   end
 
   def compile_map_expr(nid)
-    # Emit the map loop as side effects, return result array
-    compile_map_block(nid)
-    # The map_block stores result in a temp - we need to return it
-    # Actually, compile_map_block emits into current output but doesn't return the temp name.
-    # Let's use a different approach: inline and return temp
     rt = infer_type(@nd_receiver[nid])
-    rc = compile_expr(@nd_receiver[nid])
+    rc_expr = compile_expr(@nd_receiver[nid])
+    # Store receiver in a temp to avoid re-evaluation
+    rc_tmp = new_temp
+    emit("  " + c_type(rt) + " " + rc_tmp + " = " + rc_expr + ";")
+    rc = rc_tmp
     bp1 = get_block_param(nid, 0)
     if bp1 == ""
       bp1 = "_x"
@@ -11720,25 +12307,100 @@ class Compiler
     if rt == "int_array"
       @needs_int_array = 1
       @needs_gc = 1
-      emit("  sp_IntArray *" + tmp_arr + " = sp_IntArray_new();")
-      emit("  for (mrb_int " + tmp_i + " = 0; " + tmp_i + " < sp_IntArray_length(" + rc + "); " + tmp_i + "++) {")
-      emit("    lv_" + bp1 + " = sp_IntArray_get(" + rc + ", " + tmp_i + ");")
-      @indent = @indent + 1
+      # Check if block body returns string (for map that produces StrArray)
+      block_ret = "int"
       blk = @nd_block[nid]
       if blk >= 0
         body = @nd_body[blk]
         if body >= 0
           stmts = get_stmts(body)
           if stmts.length > 0
-            last = stmts[stmts.length - 1]
-            val = compile_expr(last)
-            emit("  sp_IntArray_push(" + tmp_arr + ", " + val + ");")
+            block_ret = infer_type(stmts[stmts.length - 1])
           end
         end
       end
-      @indent = @indent - 1
-      emit("  }")
-      return tmp_arr
+      # Check if block param is used as lambda (elements are lambda pointers in IntArray)
+      bp_is_lambda = 0
+      if blk >= 0
+        bp_is_lambda = param_used_as_lambda(bp1, @nd_body[blk])
+      end
+      # Also check if bp is passed to a function expecting lambda
+      if bp_is_lambda == 0
+        if blk >= 0
+          body2 = @nd_body[blk]
+          if body2 >= 0
+            stmts2 = get_stmts(body2)
+            k2 = 0
+            while k2 < stmts2.length
+              if @nd_type[stmts2[k2]] == "CallNode"
+                cn2 = @nd_name[stmts2[k2]]
+                fmi2 = find_method_idx(cn2)
+                if fmi2 >= 0
+                  fpt2 = @meth_param_types[fmi2].split(",")
+                  if fpt2.length > 0
+                    if fpt2[0] == "lambda"
+                      bp_is_lambda = 1
+                    end
+                  end
+                end
+              end
+              k2 = k2 + 1
+            end
+          end
+        end
+      end
+      if block_ret == "string"
+        @needs_str_array = 1
+        emit("  sp_StrArray *" + tmp_arr + " = sp_StrArray_new();")
+        emit("  for (mrb_int " + tmp_i + " = 0; " + tmp_i + " < sp_IntArray_length(" + rc + "); " + tmp_i + "++) {")
+        if bp_is_lambda == 1
+          declare_var(bp1, "lambda")
+          emit("    lv_" + bp1 + " = (sp_Val *)sp_IntArray_get(" + rc + ", " + tmp_i + ");")
+        else
+          emit("    lv_" + bp1 + " = sp_IntArray_get(" + rc + ", " + tmp_i + ");")
+        end
+        @indent = @indent + 1
+        blk2 = @nd_block[nid]
+        if blk2 >= 0
+          body3 = @nd_body[blk2]
+          if body3 >= 0
+            stmts3 = get_stmts(body3)
+            if stmts3.length > 0
+              last = stmts3[stmts3.length - 1]
+              val = compile_expr(last)
+              emit("  sp_StrArray_push(" + tmp_arr + ", " + val + ");")
+            end
+          end
+        end
+        @indent = @indent - 1
+        emit("  }")
+        return tmp_arr
+      else
+        emit("  sp_IntArray *" + tmp_arr + " = sp_IntArray_new();")
+        emit("  for (mrb_int " + tmp_i + " = 0; " + tmp_i + " < sp_IntArray_length(" + rc + "); " + tmp_i + "++) {")
+        if bp_is_lambda == 1
+          declare_var(bp1, "lambda")
+          emit("    lv_" + bp1 + " = (sp_Val *)sp_IntArray_get(" + rc + ", " + tmp_i + ");")
+        else
+          emit("    lv_" + bp1 + " = sp_IntArray_get(" + rc + ", " + tmp_i + ");")
+        end
+        @indent = @indent + 1
+        blk2 = @nd_block[nid]
+        if blk2 >= 0
+          body3 = @nd_body[blk2]
+          if body3 >= 0
+            stmts3 = get_stmts(body3)
+            if stmts3.length > 0
+              last = stmts3[stmts3.length - 1]
+              val = compile_expr(last)
+              emit("  sp_IntArray_push(" + tmp_arr + ", " + val + ");")
+            end
+          end
+        end
+        @indent = @indent - 1
+        emit("  }")
+        return tmp_arr
+      end
     end
     "0"
   end
@@ -12964,7 +13626,21 @@ class Compiler
       return
     end
     if return_type != "void"
-      emit("  return " + compile_expr(last) + ";")
+      val = compile_expr(last)
+      expr_type = infer_type(last)
+      if expr_type == "lambda"
+        if return_type == "int"
+          emit("  return sp_lam_to_int(" + val + ");")
+        else
+          if return_type == "bool"
+            emit("  return (" + val + ")->u.bval;")
+          else
+            emit("  return " + val + ";")
+          end
+        end
+      else
+        emit("  return " + val + ";")
+      end
     else
       compile_stmt(last)
     end

@@ -494,7 +494,7 @@ def serialize_node(node)
     if node.parameters
       bp = node.parameters
       if bp.is_a?(Prism::BlockParametersNode) && bp.parameters
-        h["parameters"] = serialize_node(bp.parameters)
+        h["parameters"] = serialize_parameters(bp.parameters)
       elsif bp.is_a?(Prism::NumberedParametersNode)
         h["parameters"] = nil
       else
