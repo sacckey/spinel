@@ -813,6 +813,19 @@ class Compiler
       if cx >= 0
         return "class_" + @nd_name[nid]
       end
+      # Check module-prefixed constants
+      mi3 = 0
+      while mi3 < @module_names.length
+        mmod = @module_names[mi3]
+        if mmod != ""
+          cpname = mmod + "_" + @nd_name[nid]
+          ci4 = find_const_idx(cpname)
+          if ci4 >= 0
+            return @const_types[ci4]
+          end
+        end
+        mi3 = mi3 + 1
+      end
       return "int"
     end
     if t == "ConstantPathNode"
@@ -825,6 +838,9 @@ class Compiler
           return @const_types[ci]
         end
         if rname == "Float"
+          return "float"
+        end
+        if rname == "Math"
           return "float"
         end
       end
@@ -1558,6 +1574,21 @@ class Compiler
     if mname == "sqrt"
       return "float"
     end
+    if mname == "cos"
+      return "float"
+    end
+    if mname == "sin"
+      return "float"
+    end
+    if mname == "log"
+      return "float"
+    end
+    if mname == "exp"
+      return "float"
+    end
+    if mname == "atan2"
+      return "float"
+    end
     if mname == "freeze"
       if recv >= 0
         return infer_type(recv)
@@ -1594,6 +1625,53 @@ class Compiler
           ci = ci + 1
         end
         return "int"
+      end
+      # Method call on int (possible IntArray element storing object pointers)
+      if rt == "int"
+        ci = 0
+        while ci < @cls_names.length
+          # Check zero-arg methods (getters)
+          ci2_mnames = @cls_meth_names[ci].split(";")
+          ci2_mparams = @cls_meth_params[ci].split("|")
+          mi2 = 0
+          while mi2 < ci2_mnames.length
+            if ci2_mnames[mi2] == mname
+              mp2 = ""
+              if mi2 < ci2_mparams.length
+                mp2 = ci2_mparams[mi2]
+              end
+              if mp2 == ""
+                # Found zero-arg method match
+                mr = cls_method_return(ci, mname)
+                if mr != "int"
+                  return mr
+                end
+              end
+            end
+            mi2 = mi2 + 1
+          end
+          # Check attr_readers
+          readers2 = @cls_attr_readers[ci].split(";")
+          j2 = 0
+          while j2 < readers2.length
+            if readers2[j2] == mname
+              ivt = cls_ivar_type(ci, "@" + mname)
+              if ivt != "int"
+                return ivt
+              end
+            end
+            j2 = j2 + 1
+          end
+          # Check methods with args
+          midx = cls_find_method_direct(ci, mname)
+          if midx >= 0
+            mr = cls_method_return(ci, mname)
+            if mr != "int"
+              return mr
+            end
+          end
+          ci = ci + 1
+        end
       end
       if is_obj_type(rt) == 1
         cname = rt[4, rt.length - 4]
@@ -2732,7 +2810,14 @@ class Compiler
         r = @nd_receiver[nid]
         if r >= 0
           if @nd_type[r] == "ConstantReadNode"
-            return "obj_" + @nd_name[r]
+            rname = @nd_name[r]
+            if rname == "Array"
+              return "int_array"
+            end
+            if rname == "Hash"
+              return "str_int_hash"
+            end
+            return "obj_" + rname
           end
         end
       end
@@ -3483,51 +3568,149 @@ class Compiler
 
   def infer_cls_meth_param_from_body
     # For each class method, if a param is used as param.attr_reader where attr_reader
-    # belongs to this class, infer param type as this class.
-    ci = 0
-    while ci < @cls_names.length
-      readers = @cls_attr_readers[ci].split(";")
-      if readers.length > 0
-        mnames = @cls_meth_names[ci].split(";")
-        all_params = @cls_meth_params[ci].split("|")
-        all_ptypes = @cls_meth_ptypes[ci].split("|")
-        bodies = @cls_meth_bodies[ci].split(";")
-        j = 0
-        while j < mnames.length
-          if mnames[j] != "initialize"
-            pnames = "".split(",")
-            ptypes = "".split(",")
+    # belongs to ANY class, infer param type as that class.
+    # Check all classes' methods (not just the class owning the readers).
+    oci = 0
+    while oci < @cls_names.length
+      mnames = @cls_meth_names[oci].split(";")
+      all_params = @cls_meth_params[oci].split("|")
+      all_ptypes = @cls_meth_ptypes[oci].split("|")
+      bodies = @cls_meth_bodies[oci].split(";")
+      changed = 0
+      j = 0
+      while j < mnames.length
+        if mnames[j] != "initialize"
+          pnames = "".split(",")
+          ptypes = "".split(",")
 
-            if j < all_params.length
-              pnames = all_params[j].split(",")
-            end
-            if j < all_ptypes.length
-              ptypes = all_ptypes[j].split(",")
-            end
-            bid = -1
-            if j < bodies.length
-              bid = bodies[j].to_i
-            end
-            if bid >= 0
-              pk = 0
-              while pk < pnames.length
-                if pk < ptypes.length
-                  if ptypes[pk] == "int"
-                    if param_calls_reader(bid, pnames[pk], readers) == 1
-                      ptypes[pk] = "obj_" + @cls_names[ci]
-                      all_ptypes[j] = join_sep(ptypes, ",")
-                      @cls_meth_ptypes[ci] = join_sep(all_ptypes, "|")
+          if j < all_params.length
+            pnames = all_params[j].split(",")
+          end
+          if j < all_ptypes.length
+            ptypes = all_ptypes[j].split(",")
+          end
+          bid = -1
+          if j < bodies.length
+            bid = bodies[j].to_i
+          end
+          if bid >= 0
+            pk = 0
+            while pk < pnames.length
+              if pk < ptypes.length
+                if ptypes[pk] == "int"
+                  # Check against ALL classes' readers and zero-arg methods
+                  ci2 = 0
+                  found_class = 0
+                  while ci2 < @cls_names.length
+                    if found_class == 0
+                      readers = @cls_attr_readers[ci2].split(";")
+                      if readers.length > 0
+                        if param_calls_reader(bid, pnames[pk], readers) == 1
+                          found_class = 1
+                        end
+                      end
+                      # Also check zero-arg class methods as readers
+                      if found_class == 0
+                        ci2_mnames = @cls_meth_names[ci2].split(";")
+                        ci2_mparams = @cls_meth_params[ci2].split("|")
+                        zero_arg_meths = "".split(",")
+                        mi2 = 0
+                        while mi2 < ci2_mnames.length
+                          mn2 = ci2_mnames[mi2]
+                          if mn2 != "initialize"
+                            mp2 = ""
+                            if mi2 < ci2_mparams.length
+                              mp2 = ci2_mparams[mi2]
+                            end
+                            if mp2 == ""
+                              zero_arg_meths.push(mn2)
+                            end
+                          end
+                          mi2 = mi2 + 1
+                        end
+                        if zero_arg_meths.length > 0
+                          if param_calls_reader(bid, pnames[pk], zero_arg_meths) == 1
+                            found_class = 1
+                          end
+                        end
+                      end
+                      if found_class == 1
+                        ptypes[pk] = "obj_" + @cls_names[ci2]
+                        all_ptypes[j] = join_sep(ptypes, ",")
+                        @cls_meth_ptypes[oci] = join_sep(all_ptypes, "|")
+                        changed = 1
+                      end
                     end
+                    ci2 = ci2 + 1
                   end
                 end
-                pk = pk + 1
+              end
+              pk = pk + 1
+            end
+          end
+        end
+        j = j + 1
+      end
+      oci = oci + 1
+    end
+    # Also infer top-level method param types from body usage
+    mi = 0
+    while mi < @meth_names.length
+      bid = @meth_body_ids[mi]
+      if bid >= 0
+        pnames = @meth_param_names[mi].split(",")
+        ptypes = @meth_param_types[mi].split(",")
+        pk = 0
+        while pk < pnames.length
+          if pk < ptypes.length
+            if ptypes[pk] == "int"
+              ci2 = 0
+              found_class = 0
+              while ci2 < @cls_names.length
+                if found_class == 0
+                  readers = @cls_attr_readers[ci2].split(";")
+                  if readers.length > 0
+                    if param_calls_reader(bid, pnames[pk], readers) == 1
+                      found_class = 1
+                    end
+                  end
+                  if found_class == 0
+                    ci2_mnames = @cls_meth_names[ci2].split(";")
+                    ci2_mparams = @cls_meth_params[ci2].split("|")
+                    zero_arg_meths = "".split(",")
+                    mi2 = 0
+                    while mi2 < ci2_mnames.length
+                      mn2 = ci2_mnames[mi2]
+                      if mn2 != "initialize"
+                        mp2 = ""
+                        if mi2 < ci2_mparams.length
+                          mp2 = ci2_mparams[mi2]
+                        end
+                        if mp2 == ""
+                          zero_arg_meths.push(mn2)
+                        end
+                      end
+                      mi2 = mi2 + 1
+                    end
+                    if zero_arg_meths.length > 0
+                      if param_calls_reader(bid, pnames[pk], zero_arg_meths) == 1
+                        found_class = 1
+                      end
+                    end
+                  end
+                  if found_class == 1
+                    ptypes[pk] = "obj_" + @cls_names[ci2]
+                    @meth_param_types[mi] = join_sep(ptypes, ",")
+                  end
+                end
+                ci2 = ci2 + 1
               end
             end
           end
-          j = j + 1
+          pk = pk + 1
         end
       end
-      ci = ci + 1
+      mi = mi + 1
     end
   end
 
@@ -3787,6 +3970,51 @@ class Compiler
     end
   end
 
+  def infer_writer_param_types
+    # For setter methods (def x=(v); @x = v; end), infer param type from ivar type
+    ci = 0
+    while ci < @cls_names.length
+      mnames = @cls_meth_names[ci].split(";")
+      all_ptypes = @cls_meth_ptypes[ci].split("|")
+      ivar_names = @cls_ivar_names[ci].split(";")
+      ivar_types = @cls_ivar_types[ci].split(";")
+      changed = 0
+      j = 0
+      while j < mnames.length
+        mn = mnames[j]
+        if mn.length > 1
+          if mn[mn.length - 1] == "="
+            bname = mn[0, mn.length - 1]
+            iname = "@" + bname
+            # Find ivar type
+            ik = 0
+            while ik < ivar_names.length
+              if ivar_names[ik] == iname
+                ivt = ivar_types[ik]
+                if ivt != "int"
+                  if ivt != "nil"
+                    if j < all_ptypes.length
+                      if all_ptypes[j] == "int"
+                        all_ptypes[j] = ivt
+                        changed = 1
+                      end
+                    end
+                  end
+                end
+              end
+              ik = ik + 1
+            end
+          end
+        end
+        j = j + 1
+      end
+      if changed == 1
+        @cls_meth_ptypes[ci] = join_sep(all_ptypes, "|")
+      end
+      ci = ci + 1
+    end
+  end
+
   def infer_all_returns
     # Pre-pass: infer class method param types from body usage
     infer_cls_meth_param_from_body
@@ -3794,6 +4022,8 @@ class Compiler
     infer_constructor_types
     # Update ivar types from constructor params
     update_ivar_types_from_params
+    # Infer setter param types from ivar types
+    infer_writer_param_types
 
     # Top-level methods
     i = 0
@@ -4887,6 +5117,8 @@ class Compiler
             end
             # Scan for calls to other methods in same class
             scan_cls_method_calls(ci, bid)
+            # Also scan for constructor calls to infer param types
+            scan_new_calls(bid)
             pop_scope
             @current_class_idx = -1
           end
@@ -5133,7 +5365,7 @@ class Compiler
 
   def emit_gc_runtime
     emit_raw("typedef struct sp_gc_hdr { struct sp_gc_hdr *next; void (*finalize)(void *); void (*scan)(void *); unsigned marked : 1; } sp_gc_hdr;")
-    emit_raw("static sp_gc_hdr *sp_gc_heap = NULL; static size_t sp_gc_bytes = 0; static size_t sp_gc_threshold = 4*1024*1024;")
+    emit_raw("static sp_gc_hdr *sp_gc_heap = NULL; static size_t sp_gc_bytes = 0; static size_t sp_gc_threshold = 256*1024*1024;")
     emit_raw("#define SP_GC_STACK_MAX 65536")
     emit_raw("static void **sp_gc_roots[SP_GC_STACK_MAX]; static int sp_gc_nroots = 0;")
     emit_raw("#define SP_GC_SAVE() int __attribute__((cleanup(sp_gc_cleanup))) _gc_saved = sp_gc_nroots")
@@ -6005,6 +6237,11 @@ class Compiler
             ivar = sanitize_ivar(@nd_name[sid])
             val = compile_expr(@nd_expression[sid])
             emit_raw("  self->" + ivar + " = " + val + ";")
+          else
+            if @nd_type[sid] != "SuperNode"
+              # Compile other statements (e.g., method calls like @arr[0] = val)
+              compile_stmt(sid)
+            end
           end
           k = k + 1
         end
@@ -6665,7 +6902,7 @@ class Compiler
     emit_raw("")
     emit_raw("int main(int argc,char**argv){")
     if @needs_gc == 1
-      emit_raw("  { volatile char _sb; sp_gc_stack_bottom = (char*)&_sb; }")
+      emit_raw("  volatile char _sb; sp_gc_stack_bottom = (char*)&_sb;")
     end
     emit_raw("  sp_argv.data=(const char**)(argv+1);sp_argv.len=argc-1;")
 
@@ -6835,6 +7072,26 @@ class Compiler
       end
       return "self->" + sanitize_ivar(@nd_name[nid])
     end
+    if t == "InstanceVariableWriteNode"
+      val = compile_expr(@nd_expression[nid])
+      # Check if in module method
+      mi3 = 0
+      while mi3 < @module_names.length
+        mmod = @module_names[mi3]
+        if mmod != ""
+          if @current_method_name.start_with?(mmod + "_cls_")
+            iname = @nd_name[nid]
+            cname3 = mmod + "_" + iname[1, iname.length - 1]
+            ci3 = find_const_idx(cname3)
+            if ci3 >= 0
+              return "(cst_" + cname3 + " = " + val + ")"
+            end
+          end
+        end
+        mi3 = mi3 + 1
+      end
+      return "(self->" + sanitize_ivar(@nd_name[nid]) + " = " + val + ")"
+    end
     if t == "ConstantReadNode"
       if @nd_name[nid] == "ARGV"
         return "sp_argv"
@@ -6842,6 +7099,27 @@ class Compiler
       ci = find_const_idx(@nd_name[nid])
       if ci >= 0
         return "cst_" + @nd_name[nid]
+      end
+      # Check if inside a module method and constant belongs to that module
+      mi3 = 0
+      while mi3 < @module_names.length
+        mmod = @module_names[mi3]
+        if mmod != ""
+          if @current_method_name.start_with?(mmod + "_cls_")
+            cpname = mmod + "_" + @nd_name[nid]
+            ci4 = find_const_idx(cpname)
+            if ci4 >= 0
+              return "cst_" + cpname
+            end
+          end
+          # Also check when in main scope (module constants referenced at top level)
+          cpname = mmod + "_" + @nd_name[nid]
+          ci5 = find_const_idx(cpname)
+          if ci5 >= 0
+            return "cst_" + cpname
+          end
+        end
+        mi3 = mi3 + 1
       end
       return @nd_name[nid]
     end
@@ -6866,6 +7144,14 @@ class Compiler
         if rname == "Integer"
           if nname == "MAX"
             return "INT64_MAX"
+          end
+        end
+        if rname == "Math"
+          if nname == "PI"
+            return "3.14159265358979323846"
+          end
+          if nname == "E"
+            return "2.71828182845904523536"
           end
         end
         return cpname
@@ -7263,6 +7549,41 @@ class Compiler
       if mname == "__method__"
         return "\"" + @current_method_name + "\""
       end
+      if mname == "Integer"
+        args_id = @nd_arguments[nid]
+        if args_id >= 0
+          arg_ids = get_args(args_id)
+          if arg_ids.length > 0
+            a0 = arg_ids[0]
+            # Handle OrNode: Integer(ARGV[0] || default)
+            if @nd_type[a0] == "OrNode"
+              lt = infer_type(@nd_left[a0])
+              rt = infer_type(@nd_right[a0])
+              if lt == "string" or lt == "argv"
+                # ARGV access || default
+                lc = compile_expr(@nd_left[a0])
+                rc2 = compile_expr(@nd_right[a0])
+                if rt == "int"
+                  return "((" + lc + ") ? (mrb_int)strtoll(" + lc + ", NULL, 10) : " + rc2 + ")"
+                else
+                  return "((" + lc + ") ? (mrb_int)strtoll(" + lc + ", NULL, 10) : (mrb_int)strtoll(" + rc2 + ", NULL, 10))"
+                end
+              end
+            end
+            at = infer_type(a0)
+            if at == "string"
+              return "(mrb_int)strtoll(" + compile_expr(a0) + ", NULL, 10)"
+            end
+            if at == "argv"
+              return "(mrb_int)strtoll(" + compile_expr(a0) + ", NULL, 10)"
+            end
+          end
+        end
+        return "(mrb_int)(" + compile_arg0(nid) + ")"
+      end
+      if mname == "Float"
+        return "(mrb_float)(" + compile_arg0(nid) + ")"
+      end
       if mname == "proc"
         if @nd_block[nid] >= 0
           @needs_proc = 1
@@ -7583,6 +7904,17 @@ class Compiler
       lt = infer_type(recv)
       if lt == "float"
         return "(" + compile_expr(recv) + " / " + compile_arg0(nid) + ")"
+      end
+      # Check RHS for float
+      args_id = @nd_arguments[nid]
+      if args_id >= 0
+        aargs = get_args(args_id)
+        if aargs.length > 0
+          rt = infer_type(aargs[0])
+          if rt == "float"
+            return "((mrb_float)" + compile_expr(recv) + " / " + compile_arg0(nid) + ")"
+          end
+        end
       end
       return "sp_idiv(" + compile_expr(recv) + ", " + compile_arg0(nid) + ")"
     end
@@ -8484,7 +8816,8 @@ class Compiler
           return "sp_argv.len"
         end
         if mname == "[]"
-          return "sp_argv.data[(int)" + compile_arg0(nid) + "]"
+          idx_expr = compile_arg0(nid)
+          return "((" + idx_expr + " < sp_argv.len) ? sp_argv.data[(int)" + idx_expr + "] : NULL)"
         end
       end
     end
@@ -8495,6 +8828,30 @@ class Compiler
       if rcname == "Math"
         if mname == "sqrt"
           return "sqrt(" + compile_arg0(nid) + ")"
+        end
+        if mname == "cos"
+          return "cos(" + compile_arg0(nid) + ")"
+        end
+        if mname == "sin"
+          return "sin(" + compile_arg0(nid) + ")"
+        end
+        if mname == "log"
+          return "log(" + compile_arg0(nid) + ")"
+        end
+        if mname == "log2"
+          return "log2(" + compile_arg0(nid) + ")"
+        end
+        if mname == "exp"
+          return "exp(" + compile_arg0(nid) + ")"
+        end
+        if mname == "atan2"
+          args_id = @nd_arguments[nid]
+          if args_id >= 0
+            arg_ids = get_args(args_id)
+            if arg_ids.length >= 2
+              return "atan2(" + compile_expr(arg_ids[0]) + ", " + compile_expr(arg_ids[1]) + ")"
+            end
+          end
         end
       end
       # File operations
@@ -8747,7 +9104,17 @@ class Compiler
         # Method call
         owner = find_method_owner(ci, mname)
         if owner != ""
-          ca = compile_call_args(nid)
+          oci2 = find_class_idx(owner)
+          midx2 = -1
+          if oci2 >= 0
+            midx2 = cls_find_method_direct(oci2, mname)
+          end
+          ca = ""
+          if midx2 >= 0
+            ca = compile_typed_call_args(nid, oci2, midx2)
+          else
+            ca = compile_call_args(nid)
+          end
           if owner == cname
             if ca != ""
               return "sp_" + owner + "_" + sanitize_name(mname) + "(" + rc + ", " + ca + ")"
@@ -8762,6 +9129,62 @@ class Compiler
             end
           end
         end
+      end
+    end
+
+    # Fallback: if receiver is int (e.g. from IntArray get) but method belongs to a class,
+    # cast the int to the appropriate class pointer and dispatch
+    if recv_type == "int"
+      ci2 = 0
+      while ci2 < @cls_names.length
+        cname2 = @cls_names[ci2]
+        readers2 = @cls_attr_readers[ci2].split(";")
+        found_reader = 0
+        j2 = 0
+        while j2 < readers2.length
+          if readers2[j2] == mname
+            found_reader = 1
+          end
+          j2 = j2 + 1
+        end
+        if found_reader == 1
+          return "((sp_" + cname2 + " *)" + rc + ")->" + mname
+        end
+        # Check writers
+        if mname.length > 1
+          if mname[mname.length - 1] == "="
+            bname2 = mname[0, mname.length - 1]
+            writers2 = @cls_attr_writers[ci2].split(";")
+            j2 = 0
+            while j2 < writers2.length
+              if writers2[j2] == bname2
+                return "(((sp_" + cname2 + " *)" + rc + ")->" + bname2 + " = " + compile_arg0(nid) + ")"
+              end
+              j2 = j2 + 1
+            end
+          end
+        end
+        # Check methods
+        owner2 = find_method_owner(ci2, mname)
+        if owner2 != ""
+          oci3 = find_class_idx(owner2)
+          midx3 = -1
+          if oci3 >= 0
+            midx3 = cls_find_method_direct(oci3, mname)
+          end
+          ca2 = ""
+          if midx3 >= 0
+            ca2 = compile_typed_call_args(nid, oci3, midx3)
+          else
+            ca2 = compile_call_args(nid)
+          end
+          if ca2 != ""
+            return "sp_" + owner2 + "_" + sanitize_name(mname) + "((sp_" + owner2 + " *)" + rc + ", " + ca2 + ")"
+          else
+            return "sp_" + owner2 + "_" + sanitize_name(mname) + "((sp_" + owner2 + " *)" + rc + ")"
+          end
+        end
+        ci2 = ci2 + 1
       end
     end
 
@@ -9087,6 +9510,48 @@ class Compiler
     result
   end
 
+  def compile_typed_call_args(nid, target_ci, target_midx)
+    # Like compile_call_args but casts arguments to match target method param types
+    args_id = @nd_arguments[nid]
+    if args_id < 0
+      return ""
+    end
+    arg_ids = get_args(args_id)
+    all_ptypes = @cls_meth_ptypes[target_ci].split("|")
+    ptypes = "".split(",")
+    if target_midx < all_ptypes.length
+      ptypes = all_ptypes[target_midx].split(",")
+    end
+    result = ""
+    k = 0
+    while k < arg_ids.length
+      if k > 0
+        result = result + ", "
+      end
+      aexpr = compile_expr(arg_ids[k])
+      at = infer_type(arg_ids[k])
+      if k < ptypes.length
+        pt = ptypes[k]
+        if at == "int"
+          if is_obj_type(pt) == 1
+            # Cast int to object pointer
+            pcname = pt[4, pt.length - 4]
+            aexpr = "(sp_" + pcname + " *)" + aexpr
+          end
+        end
+        if is_obj_type(at) == 1
+          if pt == "int"
+            # Cast object pointer to int
+            aexpr = "(mrb_int)" + aexpr
+          end
+        end
+      end
+      result = result + aexpr
+      k = k + 1
+    end
+    result
+  end
+
   def find_method_owner(ci, mname)
     if ci < 0
       return ""
@@ -9340,7 +9805,27 @@ class Compiler
     end
     if t == "InstanceVariableWriteNode"
       val = compile_expr(@nd_expression[nid])
-      emit("  self->" + sanitize_ivar(@nd_name[nid]) + " = " + val + ";")
+      # Check if we're in a module class method
+      mod_ivar = 0
+      mi3 = 0
+      while mi3 < @module_names.length
+        mmod = @module_names[mi3]
+        if mmod != ""
+          if @current_method_name.start_with?(mmod + "_cls_")
+            iname = @nd_name[nid]
+            cname3 = mmod + "_" + iname[1, iname.length - 1]
+            ci3 = find_const_idx(cname3)
+            if ci3 >= 0
+              emit("  cst_" + cname3 + " = " + val + ";")
+              mod_ivar = 1
+            end
+          end
+        end
+        mi3 = mi3 + 1
+      end
+      if mod_ivar == 0
+        emit("  self->" + sanitize_ivar(@nd_name[nid]) + " = " + val + ";")
+      end
       return
     end
     if t == "InstanceVariableOperatorWriteNode"
@@ -9442,7 +9927,8 @@ class Compiler
       while k < elems.length
         tmp = new_temp
         tmps.push(tmp)
-        emit("  mrb_int " + tmp + " = " + compile_expr(elems[k]) + ";")
+        et = infer_type(elems[k])
+        emit("  " + c_type(et) + " " + tmp + " = " + compile_expr(elems[k]) + ";")
         k = k + 1
       end
       # Now assign
@@ -9452,6 +9938,29 @@ class Compiler
           tid = targets[k]
           if @nd_type[tid] == "LocalVariableTargetNode"
             emit("  lv_" + @nd_name[tid] + " = " + tmps[k] + ";")
+          end
+          if @nd_type[tid] == "InstanceVariableTargetNode"
+            iname = @nd_name[tid]
+            # Check if in module method
+            mod_ivar = 0
+            mi3 = 0
+            while mi3 < @module_names.length
+              mmod = @module_names[mi3]
+              if mmod != ""
+                if @current_method_name.start_with?(mmod + "_cls_")
+                  cname3 = mmod + "_" + iname[1, iname.length - 1]
+                  ci3 = find_const_idx(cname3)
+                  if ci3 >= 0
+                    emit("  cst_" + cname3 + " = " + tmps[k] + ";")
+                    mod_ivar = 1
+                  end
+                end
+              end
+              mi3 = mi3 + 1
+            end
+            if mod_ivar == 0
+              emit("  self->" + sanitize_ivar(iname) + " = " + tmps[k] + ";")
+            end
           end
         end
         k = k + 1
@@ -9826,6 +10335,31 @@ class Compiler
       if recv < 0
         compile_print(nid)
         return
+      end
+    end
+    if mname == "printf"
+      if recv < 0
+        args_id = @nd_arguments[nid]
+        if args_id >= 0
+          arg_ids = get_args(args_id)
+          if arg_ids.length >= 1
+            # First arg is format string
+            fmt_expr = compile_expr(arg_ids[0])
+            rest_args = ""
+            k = 1
+            while k < arg_ids.length
+              at = infer_type(arg_ids[k])
+              if at == "int"
+                rest_args = rest_args + ", (int)" + compile_expr(arg_ids[k])
+              else
+                rest_args = rest_args + ", " + compile_expr(arg_ids[k])
+              end
+              k = k + 1
+            end
+            emit("  printf(" + fmt_expr + rest_args + ");")
+            return
+          end
+        end
       end
     end
 
@@ -10430,7 +10964,16 @@ class Compiler
       val = compile_expr(arg_ids[1])
     end
     if rt == "int_array"
-      emit("  sp_IntArray_set(" + rc + ", " + idx + ", " + val + ");")
+      # Check if value is an object pointer - needs cast
+      vt = "int"
+      if arg_ids.length >= 2
+        vt = infer_type(arg_ids[1])
+      end
+      if is_obj_type(vt) == 1
+        emit("  sp_IntArray_set(" + rc + ", " + idx + ", (mrb_int)" + val + ");")
+      else
+        emit("  sp_IntArray_set(" + rc + ", " + idx + ", " + val + ");")
+      end
       return
     end
     if rt == "float_array"
