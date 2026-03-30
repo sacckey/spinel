@@ -982,6 +982,15 @@ class Compiler
     if mname == "to_f"
       return "float"
     end
+    if mname == "ceil"
+      return "int"
+    end
+    if mname == "floor"
+      return "int"
+    end
+    if mname == "round"
+      return "int"
+    end
     if mname == "upcase"
       return "string"
     end
@@ -1044,6 +1053,24 @@ class Compiler
     end
     if mname == "nil?"
       return "bool"
+    end
+    if mname == "abs"
+      if recv >= 0
+        lt = infer_type(recv)
+        if lt == "float"
+          return "float"
+        end
+      end
+      return "int"
+    end
+    if mname == "**"
+      if recv >= 0
+        lt = infer_type(recv)
+        if lt == "float"
+          return "float"
+        end
+      end
+      return "int"
     end
     if mname == "has_key?"
       return "bool"
@@ -1972,6 +1999,28 @@ class Compiler
     end
   end
 
+  def update_ivar_type(ci, iname, new_type)
+    names = @cls_ivar_names[ci].split(";")
+    types = @cls_ivar_types[ci].split(";")
+    k = 0
+    while k < names.length
+      if names[k] == iname
+        if k < types.length
+          if types[k] == "int"
+            types[k] = new_type
+            @cls_ivar_types[ci] = join_sep(types, ";")
+          end
+          if types[k] == "nil"
+            types[k] = new_type
+            @cls_ivar_types[ci] = join_sep(types, ";")
+          end
+        end
+        return
+      end
+      k = k + 1
+    end
+  end
+
   def ivar_exists(ci, iname)
     names = @cls_ivar_names[ci].split(";")
     k = 0
@@ -2003,6 +2052,17 @@ class Compiler
       if ivar_exists(ci, iname) == 0
         vtype = infer_ivar_init_type(@nd_expression[nid])
         add_ivar(ci, iname, vtype)
+      else
+        # Update type if current type is int (default/nil) and new type is better
+        expr = @nd_expression[nid]
+        if expr >= 0
+          if @nd_type[expr] != "NilNode"
+            vtype = infer_ivar_init_type(expr)
+            if vtype != "int"
+              update_ivar_type(ci, iname, vtype)
+            end
+          end
+        end
       end
     end
     if @nd_type[nid] == "InstanceVariableOperatorWriteNode"
@@ -2077,6 +2137,9 @@ class Compiler
       return "int"
     end
     t = @nd_type[nid]
+    if t == "NilNode"
+      return "nil"
+    end
     if t == "IntegerNode"
       return "int"
     end
@@ -2624,11 +2687,13 @@ class Compiler
   end
 
   def update_ivar_types_from_params
-    # For each class, if initialize assigns @ivar = param, update ivar type from param type
+    # For each class method, if it assigns @ivar = param, update ivar type from param type
     i = 0
     while i < @cls_names.length
-      init_idx = cls_find_method_direct(i, "initialize")
-      if init_idx >= 0
+      mnames = @cls_meth_names[i].split(";")
+      mi = 0
+      while mi < mnames.length
+        init_idx = mi
         all_params = @cls_meth_params[i].split("|")
         all_ptypes = @cls_meth_ptypes[i].split("|")
         pnames = []
@@ -2669,6 +2734,9 @@ class Compiler
                             if ivar_types[ij] == "int"
                               ivar_types[ij] = ptypes[pi]
                             end
+                            if ivar_types[ij] == "nil"
+                              ivar_types[ij] = ptypes[pi]
+                            end
                           end
                           ij = ij + 1
                         end
@@ -2683,6 +2751,7 @@ class Compiler
             k = k + 1
           end
         end
+        mi = mi + 1
       end
       i = i + 1
     end
@@ -2808,6 +2877,144 @@ class Compiler
     0
   end
 
+  def infer_ivar_types_from_writers
+    # Set up main scope for type inference
+    push_scope
+    stmts = get_body_stmts(@root_id)
+    lnames = "".split(",")
+    ltypes = "".split(",")
+    empty_p = "".split(",")
+    i = 0
+    while i < stmts.length
+      sid = stmts[i]
+      if @nd_type[sid] != "DefNode"
+        if @nd_type[sid] != "ClassNode"
+          if @nd_type[sid] != "ConstantWriteNode"
+            if @nd_type[sid] != "ModuleNode"
+              scan_locals(sid, lnames, ltypes, empty_p)
+            end
+          end
+        end
+      end
+      i = i + 1
+    end
+    k = 0
+    while k < lnames.length
+      declare_var(lnames[k], ltypes[k])
+      k = k + 1
+    end
+    # Also scan inside method bodies
+    i = 0
+    while i < @meth_names.length
+      push_scope
+      pnames = @meth_param_names[i].split(",")
+      ptypes = @meth_param_types[i].split(",")
+      j = 0
+      while j < pnames.length
+        pt = "int"
+        if j < ptypes.length
+          pt = ptypes[j]
+        end
+        declare_var(pnames[j], pt)
+        j = j + 1
+      end
+      if @meth_body_ids[i] >= 0
+        ml = []
+        mt = []
+        scan_locals(@meth_body_ids[i], ml, mt, pnames)
+        lk = 0
+        while lk < ml.length
+          declare_var(ml[lk], mt[lk])
+          lk = lk + 1
+        end
+        scan_writer_calls(@meth_body_ids[i])
+      end
+      pop_scope
+      i = i + 1
+    end
+    # Scan main-level code
+    scan_writer_calls(@root_id)
+    pop_scope
+  end
+
+  def scan_writer_calls(nid)
+    if nid < 0
+      return
+    end
+    if @nd_type[nid] == "CallNode"
+      mname = @nd_name[nid]
+      recv = @nd_receiver[nid]
+      if recv >= 0
+        if mname.length > 1
+          if mname[mname.length - 1] == "="
+            bname = mname[0, mname.length - 1]
+            rt = infer_type(recv)
+            if is_obj_type(rt) == 1
+              cname = rt[4, rt.length - 4]
+              ci = find_class_idx(cname)
+              if ci >= 0
+                writers = @cls_attr_writers[ci].split(";")
+                wk = 0
+                while wk < writers.length
+                  if writers[wk] == bname
+                    iname = "@" + bname
+                    args_id = @nd_arguments[nid]
+                    if args_id >= 0
+                      arg_ids = get_args(args_id)
+                      if arg_ids.length > 0
+                        at = infer_type(arg_ids[0])
+                        if at != "int"
+                          if at != "nil"
+                            update_ivar_type(ci, iname, at)
+                          end
+                        end
+                      end
+                    end
+                  end
+                  wk = wk + 1
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+    # Recurse
+    if @nd_body[nid] >= 0
+      scan_writer_calls(@nd_body[nid])
+    end
+    stmts = parse_id_list(@nd_stmts[nid])
+    k = 0
+    while k < stmts.length
+      scan_writer_calls(stmts[k])
+      k = k + 1
+    end
+    if @nd_expression[nid] >= 0
+      scan_writer_calls(@nd_expression[nid])
+    end
+    if @nd_arguments[nid] >= 0
+      scan_writer_calls(@nd_arguments[nid])
+    end
+    args = parse_id_list(@nd_args[nid])
+    k = 0
+    while k < args.length
+      scan_writer_calls(args[k])
+      k = k + 1
+    end
+    if @nd_block[nid] >= 0
+      scan_writer_calls(@nd_block[nid])
+    end
+    if @nd_predicate[nid] >= 0
+      scan_writer_calls(@nd_predicate[nid])
+    end
+    if @nd_subsequent[nid] >= 0
+      scan_writer_calls(@nd_subsequent[nid])
+    end
+    if @nd_else_clause[nid] >= 0
+      scan_writer_calls(@nd_else_clause[nid])
+    end
+  end
+
   def infer_all_returns
     # Pre-pass: infer class method param types from body usage
     infer_cls_meth_param_from_body
@@ -2830,6 +3037,17 @@ class Compiler
         end
         declare_var(pnames[j], pt)
         j = j + 1
+      end
+      # Also declare locals for better return type inference
+      if @meth_body_ids[i] >= 0
+        lnames = []
+        ltypes = []
+        scan_locals(@meth_body_ids[i], lnames, ltypes, pnames)
+        lk = 0
+        while lk < lnames.length
+          declare_var(lnames[lk], ltypes[lk])
+          lk = lk + 1
+        end
       end
       rt = infer_body_return(@meth_body_ids[i])
       @meth_return_types[i] = rt
@@ -3640,6 +3858,10 @@ class Compiler
     detect_poly_params
     detect_poly_locals
     # Re-infer return types after main call type fixes
+    infer_all_returns
+    # Update ivar types from writer calls (after return types are known)
+    infer_ivar_types_from_writers
+    # Re-infer again with updated ivar types
     infer_all_returns
     detect_features
     generate_code
@@ -5478,6 +5700,13 @@ class Compiler
     end
 
     # Operators
+    if mname == "**"
+      lt = infer_type(recv)
+      if lt == "int"
+        return "((mrb_int)pow((double)" + compile_expr(recv) + ", (double)" + compile_arg0(nid) + "))"
+      end
+      return "pow(" + compile_expr(recv) + ", " + compile_arg0(nid) + ")"
+    end
     if mname == "+"
       lt = infer_type(recv)
       if lt == "string"
@@ -5825,6 +6054,18 @@ class Compiler
       end
       if mname == "to_i"
         return "(mrb_int)(" + rc + ")"
+      end
+      if mname == "ceil"
+        return "(mrb_int)ceil(" + rc + ")"
+      end
+      if mname == "floor"
+        return "(mrb_int)floor(" + rc + ")"
+      end
+      if mname == "round"
+        return "(mrb_int)round(" + rc + ")"
+      end
+      if mname == "abs"
+        return "fabs(" + rc + ")"
       end
     end
 
@@ -8852,6 +9093,43 @@ class Compiler
         end
         return
       end
+    end
+    # For statement-like nodes as last expression, compile as stmt then return default
+    lt = @nd_type[last]
+    if lt == "InstanceVariableWriteNode"
+      compile_stmt(last)
+      if return_type != "void"
+        emit("  return " + c_default_val(return_type) + ";")
+      end
+      return
+    end
+    if lt == "InstanceVariableOperatorWriteNode"
+      compile_stmt(last)
+      if return_type != "void"
+        emit("  return " + c_default_val(return_type) + ";")
+      end
+      return
+    end
+    if lt == "LocalVariableWriteNode"
+      compile_stmt(last)
+      if return_type != "void"
+        emit("  return lv_" + @nd_name[last] + ";")
+      end
+      return
+    end
+    if lt == "LocalVariableOperatorWriteNode"
+      compile_stmt(last)
+      if return_type != "void"
+        emit("  return lv_" + @nd_name[last] + ";")
+      end
+      return
+    end
+    if lt == "MultiWriteNode"
+      compile_stmt(last)
+      if return_type != "void"
+        emit("  return " + c_default_val(return_type) + ";")
+      end
+      return
     end
     if return_type != "void"
       emit("  return " + compile_expr(last) + ";")
