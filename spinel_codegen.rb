@@ -237,7 +237,7 @@ class Compiler
 
   def read_text_ast(data)
     lines = data.split("\n")
-    # First pass: find max node ID
+    # Pass 1: find max node ID
     max_id = 0
     i = 0
     while i < lines.length
@@ -258,68 +258,71 @@ class Compiler
       end
       i = i + 1
     end
-
-    # Allocate all nodes
+    # Allocate nodes
     j = 0
     while j <= max_id
       alloc_node
       j = j + 1
     end
-
-    # Second pass: populate fields
+    # Pass 2: populate fields
     i = 0
     while i < lines.length
       line = lines[i]
       if line.length > 0
-        parts = line.split(" ")
-        if parts.length >= 3
-          tag = parts[0]
-          nid = parts[1].to_i
-          if tag == "N"
-            @nd_type[nid] = parts[2]
-          end
-          if tag == "S"
-            field = parts[2]
-            val = ""
-            if parts.length >= 4
-              val = unescape_str(parts[3])
-            end
-            set_string_field(nid, field, val)
-          end
-          if tag == "I"
-            field = parts[2]
-            val = 0
-            if parts.length >= 4
-              val = parts[3].to_i
-            end
-            set_int_field(nid, field, val)
-          end
-          if tag == "F"
-            field = parts[2]
-            if parts.length >= 4
-              @nd_content[nid] = parts[3]
-            end
-          end
-          if tag == "R"
-            field = parts[2]
-            ref_id = -1
-            if parts.length >= 4
-              ref_id = parts[3].to_i
-            end
-            set_ref_field(nid, field, ref_id)
-          end
-          if tag == "A"
-            field = parts[2]
-            ids_str = ""
-            if parts.length >= 4
-              ids_str = parts[3]
-            end
-            set_array_field(nid, field, ids_str)
-          end
-        end
+        ast_parse_line(line)
       end
       i = i + 1
     end
+  end
+
+  def ast_parse_line(line)
+    parts = line.split(" ")
+    if parts.length < 3
+      return
+    end
+    tag = parts[0]
+    nid = parts[1].to_i
+    if tag == "N"
+      @nd_type[nid] = parts[2]
+    end
+    if tag == "S"
+      field = parts[2]
+      val = ""
+      if parts.length >= 4
+        val = unescape_str(parts[3])
+      end
+      set_string_field(nid, field, val)
+    end
+    if tag == "I"
+      field = parts[2]
+      ival = 0
+      if parts.length >= 4
+        ival = parts[3].to_i
+      end
+      set_int_field(nid, field, ival)
+    end
+    if tag == "F"
+      if parts.length >= 4
+        @nd_content[nid] = parts[3]
+      end
+    end
+    if tag == "R"
+      field = parts[2]
+      ref_id = -1
+      if parts.length >= 4
+        ref_id = parts[3].to_i
+      end
+      set_ref_field(nid, field, ref_id)
+    end
+    if tag == "A"
+      field = parts[2]
+      ids_str = ""
+      if parts.length >= 4
+        ids_str = parts[3]
+      end
+      set_array_field(nid, field, ids_str)
+    end
+    0
   end
 
   def unescape_str(s)
