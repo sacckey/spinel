@@ -2614,6 +2614,16 @@ class Compiler
           ptypes_str = ptypes_str + "int_array"
         end
       end
+      # Block param (&block)
+      blk = @nd_block[params]
+      if blk >= 0
+        if @nd_type[blk] == "BlockParameterNode"
+          if ptypes_str != ""
+            ptypes_str = ptypes_str + ","
+          end
+          ptypes_str = ptypes_str + "proc"
+        end
+      end
     end
 
     @meth_names.push(mname)
@@ -9250,18 +9260,50 @@ class Compiler
     @proc_counter = @proc_counter + 1
     fname = "_sp_proc_fn_" + @proc_counter.to_s
     bbody = @nd_body[blk]
-    # Compile body as expression
+    # Save current output, compile body into a separate buffer
+    save_out = @out
+    @out = ""
+    push_scope
+    declare_var(bp, "int")
     bexpr = "0"
+    body_stmts = ""
     if bbody >= 0
       bs = get_stmts(bbody)
       if bs.length > 0
-        push_scope
-        declare_var(bp, "int")
-        bexpr = compile_expr(bs[bs.length - 1])
-        pop_scope
+        # Compile all statements (including side effects of last)
+        k = 0
+        while k < bs.length
+          lt = infer_type(bs[k])
+          if k == bs.length - 1
+            if lt != "void"
+              # Last statement: compile all previous, then get return expr
+              body_stmts = @out
+              @out = ""
+              bexpr = compile_expr(bs[k])
+              extra = @out
+              @out = ""
+              body_stmts = body_stmts + extra
+            else
+              # Last is void (like puts): compile as statement, return 0
+              compile_stmt(bs[k])
+            end
+          else
+            compile_stmt(bs[k])
+          end
+          k = k + 1
+        end
+        if body_stmts == ""
+          body_stmts = @out
+          @out = ""
+        end
       end
     end
-    # Use GCC nested function to define function inline
+    pop_scope
+    @out = save_out
+    # Build function body
+    if body_stmts != ""
+      return "({ mrb_int " + fname + "(mrb_int lv_" + bp + ") { " + body_stmts.strip + " return " + bexpr + "; } sp_proc_new(" + fname + "); })"
+    end
     return "({ mrb_int " + fname + "(mrb_int lv_" + bp + ") { return " + bexpr + "; } sp_proc_new(" + fname + "); })"
   end
 
