@@ -129,6 +129,9 @@ class Compiler
     @needs_file_io = 0
     @needs_mutable_str = 0
     @needs_rb_value = 0
+    @needs_proc = 0
+    @proc_counter = 0
+    @proc_funcs = ""
 
     # Poly tracking: functions with params called with different types
     @poly_funcs = "".split(",")
@@ -1342,6 +1345,9 @@ class Compiler
           if rn == "Hash"
             return "str_int_hash"
           end
+          if rn == "Proc"
+            return "proc"
+          end
           return "obj_" + rn
         end
       end
@@ -1459,6 +1465,20 @@ class Compiler
       return mr
     end
 
+    # proc / Proc.new
+    if mname == "proc"
+      return "proc"
+    end
+    if mname == "new"
+      if recv >= 0
+        if @nd_type[recv] == "ConstantReadNode"
+          if @nd_name[recv] == "Proc"
+            return "proc"
+          end
+        end
+      end
+    end
+
     # Check open class methods for receiver type
     if recv >= 0
       rt = infer_type(recv)
@@ -1538,6 +1558,9 @@ class Compiler
   end
 
   def is_obj_type(t)
+    if t == nil
+      return 0
+    end
     if t.length > 4
       if t[0] == "o"
         if t[1] == "b"
@@ -1609,6 +1632,9 @@ class Compiler
     if t == "poly"
       return "sp_RbVal"
     end
+    if t == "proc"
+      return "sp_Proc"
+    end
     if is_obj_type(t) == 1
       cname = t[4, t.length - 4]
       return "sp_" + cname + " *"
@@ -1640,6 +1666,9 @@ class Compiler
     end
     if t == "poly"
       return "sp_box_nil()"
+    end
+    if t == "proc"
+      return "sp_proc_new(NULL)"
     end
     if type_is_pointer(t) == 1
       return "NULL"
@@ -2074,6 +2103,16 @@ class Compiler
         result = result + @nd_name[rest]
       end
     end
+    # Block parameter (&block)
+    blk = @nd_block[params]
+    if blk >= 0
+      if @nd_type[blk] == "BlockParameterNode"
+        if result != ""
+          result = result + ","
+        end
+        result = result + @nd_name[blk]
+      end
+    end
     result
   end
 
@@ -2132,6 +2171,16 @@ class Compiler
         result = result + "int_array"
       end
     end
+    # Block parameter (&block)
+    blk = @nd_block[params]
+    if blk >= 0
+      if @nd_type[blk] == "BlockParameterNode"
+        if result != ""
+          result = result + ","
+        end
+        result = result + "proc"
+      end
+    end
     result
   end
 
@@ -2182,6 +2231,16 @@ class Compiler
     rest = @nd_rest[params]
     if rest >= 0
       if @nd_type[rest] == "RestParameterNode"
+        if result != ""
+          result = result + ","
+        end
+        result = result + "-1"
+      end
+    end
+    # Block param
+    blk = @nd_block[params]
+    if blk >= 0
+      if @nd_type[blk] == "BlockParameterNode"
         if result != ""
           result = result + ","
         end
@@ -3895,8 +3954,14 @@ class Compiler
             if rn == "Hash"
               @needs_str_int_hash = 1
             end
+            if rn == "Proc"
+              @needs_proc = 1
+            end
           end
         end
+      end
+      if mname == "proc"
+        @needs_proc = 1
       end
       if mname == "to_a"
         if @nd_receiver[nid] >= 0
@@ -3964,6 +4029,9 @@ class Compiler
           end
         end
       end
+    end
+    if t == "BlockParameterNode"
+      @needs_proc = 1
     end
     # Recurse
     scan_features_children(nid)
@@ -4371,6 +4439,9 @@ class Compiler
     if @needs_file_io == 1
       emit_file_io_runtime
     end
+    if @needs_proc == 1
+      emit_proc_runtime
+    end
     emit_class_structs
     emit_forward_decls
     emit_class_methods
@@ -4602,6 +4673,14 @@ class Compiler
     emit_raw("static void sp_file_delete(const char *path) { remove(path); }")
     emit_raw("static const char *sp_backtick(const char *cmd) { FILE *p = popen(cmd, \"r\"); if (!p) return \"\"; char *buf = (char *)malloc(4096); size_t n = fread(buf, 1, 4095, p); buf[n] = 0; pclose(p); return buf; }")
     emit_raw("static const char *sp_file_basename(const char *path) { const char *s = strrchr(path, '/'); if (s) return s + 1; return path; }")
+    emit_raw("")
+  end
+
+  def emit_proc_runtime
+    emit_raw("typedef mrb_int (*sp_proc_fn_t)(mrb_int);")
+    emit_raw("typedef struct { sp_proc_fn_t fn; } sp_Proc;")
+    emit_raw("static sp_Proc sp_proc_new(sp_proc_fn_t fn) { sp_Proc p; p.fn = fn; return p; }")
+    emit_raw("static mrb_int sp_proc_call(sp_Proc p, mrb_int arg) { return p.fn ? p.fn(arg) : 0; }")
     emit_raw("")
   end
 
@@ -6336,6 +6415,12 @@ class Compiler
       if mname == "__method__"
         return "\"" + @current_method_name + "\""
       end
+      if mname == "proc"
+        if @nd_block[nid] >= 0
+          @needs_proc = 1
+          return compile_proc_literal(nid)
+        end
+      end
       if mname == "method"
         # method(:name) - record the method reference
         args_id = @nd_arguments[nid]
@@ -6411,6 +6496,23 @@ class Compiler
         yargs = ""
         if @meth_has_yield[mi] == 1
           yargs = ", NULL, NULL"
+        end
+        # Check if function has a &block param and caller provides a block
+        ptypes = @meth_param_types[mi].split(",")
+        has_block_param = 0
+        pk = 0
+        while pk < ptypes.length
+          if ptypes[pk] == "proc"
+            has_block_param = 1
+          end
+          pk = pk + 1
+        end
+        if has_block_param == 1
+          if @nd_block[nid] >= 0
+            @needs_proc = 1
+            block_proc = compile_proc_literal(nid)
+            return "sp_" + sanitize_name(mname) + "(" + compile_call_args(nid) + ", " + block_proc + ")"
+          end
         end
         return "sp_" + sanitize_name(mname) + "(" + compile_call_args_with_defaults(nid, mi) + yargs + ")"
       end
@@ -6558,11 +6660,12 @@ class Compiler
       end
     end
 
-    # .call on method reference
+    # .call on method reference or proc
     if mname == "call"
       if recv >= 0
         if @nd_type[recv] == "LocalVariableReadNode"
           rname = @nd_name[recv]
+          # Check method references
           ri = 0
           while ri < @method_ref_vars.length
             if @method_ref_vars[ri] == rname
@@ -6573,6 +6676,11 @@ class Compiler
               end
             end
             ri = ri + 1
+          end
+          # Check if it's a proc variable
+          vt = find_var_type(rname)
+          if vt == "proc"
+            return "sp_proc_call(lv_" + rname + ", " + compile_arg0(nid) + ")"
           end
         end
       end
@@ -6698,6 +6806,12 @@ class Compiler
     if mname == "new"
       if @nd_type[recv] == "ConstantReadNode"
         cname = @nd_name[recv]
+        if cname == "Proc"
+          if @nd_block[nid] >= 0
+            @needs_proc = 1
+            return compile_proc_literal(nid)
+          end
+        end
         if cname == "Array"
           @needs_int_array = 1
           @needs_gc = 1
@@ -9123,6 +9237,34 @@ class Compiler
     compile_stmt(nid)
   end
 
+  def compile_proc_literal(nid)
+    blk = @nd_block[nid]
+    if blk < 0
+      return "sp_proc_new(NULL)"
+    end
+    bp = get_block_param(nid, 0)
+    if bp == ""
+      bp = "_unused"
+    end
+    # Generate a static function for the proc body
+    @proc_counter = @proc_counter + 1
+    fname = "_sp_proc_fn_" + @proc_counter.to_s
+    bbody = @nd_body[blk]
+    # Compile body as expression
+    bexpr = "0"
+    if bbody >= 0
+      bs = get_stmts(bbody)
+      if bs.length > 0
+        push_scope
+        declare_var(bp, "int")
+        bexpr = compile_expr(bs[bs.length - 1])
+        pop_scope
+      end
+    end
+    # Use GCC nested function to define function inline
+    return "({ mrb_int " + fname + "(mrb_int lv_" + bp + ") { return " + bexpr + "; } sp_proc_new(" + fname + "); })"
+  end
+
   def compile_bracket_assign(nid)
     recv = @nd_receiver[nid]
     rt = infer_type(recv)
@@ -10598,6 +10740,14 @@ class Compiler
         if lmname == "select"
           if return_type != "void"
             val = compile_select_expr(last)
+            emit("  return " + val + ";")
+            return
+          end
+        end
+        if lmname == "proc"
+          if return_type != "void"
+            @needs_proc = 1
+            val = compile_proc_literal(last)
             emit("  return " + val + ";")
             return
           end
