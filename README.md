@@ -34,7 +34,10 @@ Native binary           Standalone, no runtime dependencies
 ## Quick Start
 
 ```bash
-# One command (requires spinel wrapper + compiled binaries):
+# Build everything:
+make
+
+# Compile a Ruby program:
 ./spinel app.rb              # compiles to ./app
 ./spinel app.rb -o myapp     # compiles to ./myapp
 ./spinel app.rb -c           # generates app.c only
@@ -45,8 +48,6 @@ ruby spinel_parse.rb app.rb > app.ast
 ruby spinel_codegen.rb app.ast app.c
 cc -O2 app.c -lm -o app
 ```
-
-Programs using regular expressions need `--lonig` (links oniguruma).
 
 ## Self-Hosting
 
@@ -62,7 +63,7 @@ gen2.c == gen3.c   (bootstrap loop closed)
 
 ## Benchmarks
 
-39/39 benchmarks pass. 58/60 tests pass.
+39/39 benchmarks pass. 59/60 tests pass.
 
 | Benchmark | Spinel | CRuby 3.x | Speedup |
 |-----------|--------|-----------|---------|
@@ -108,6 +109,10 @@ Range, Time, StringIO, File, Regexp. Polymorphic values via tagged unions.
 **Strings**: `<<` automatically promotes to mutable strings (`sp_String`)
 for O(n) in-place append. `+`, interpolation, and methods work on both.
 
+**Regexp**: Built-in NFA regexp engine (no external dependency).
+`=~`, `$1`-`$9`, `match?`, `gsub(/re/, str)`, `sub(/re/, str)`,
+`scan(/re/)`, `split(/re/)`.
+
 **Memory**: Mark-and-sweep GC with explicit roots, conservative stack
 scanning, and adaptive threshold. Arrays track GC-managed memory for
 accurate collection.
@@ -118,13 +123,15 @@ accurate collection.
 ## Architecture
 
 ```
-spinel              One-command wrapper script (Ruby)
+spinel              One-command wrapper script (POSIX shell)
 spinel_parse.rb     CRuby frontend: Prism AST → text format (715 lines)
 spinel_parse.c      C frontend: libprism → text format (915 lines)
-spinel_codegen.rb   Compiler backend: AST → C code (14,280 lines)
+spinel_codegen.rb   Compiler backend: AST → C code (14,498 lines)
+lib/regexp/         Built-in regexp engine (1,759 lines)
 lib/                Stub libraries (stringio, strscan, optparse, etc.)
 test/               60 test programs
 benchmark/          39 benchmark programs
+Makefile            Build automation
 ```
 
 The compiler backend (`spinel_codegen.rb`) is written in a Ruby subset
@@ -144,24 +151,17 @@ C binary if available.
 ## Building
 
 ```bash
-# Build libprism (from Prism gem source or standalone)
-PRISM=~/.gem/ruby/3.2.0/gems/prism-1.9.0
-cc -O2 -c -I$PRISM/include $PRISM/src/*.c $PRISM/src/util/*.c
-ar rcs libprism.a *.o
-
-# Build the C parser
-cc -O2 -I$PRISM/include spinel_parse.c libprism.a -lm -o spinel_parse_bin
-
-# Bootstrap the compiler backend
-ruby spinel_parse.rb spinel_codegen.rb > codegen.ast
-ruby spinel_codegen.rb codegen.ast gen1.c
-cc -O2 -Wno-all gen1.c -lm -o bin1
-./bin1 codegen.ast gen2.c
-cc -O2 -Wno-all gen2.c -lm -o spinel_codegen
-
-# Now you can compile Ruby programs:
-./spinel app.rb
+make              # build parser + regexp library + bootstrap compiler
+make test         # run 60 tests
+make bench        # run 39 benchmarks
+make clean        # remove build artifacts
 ```
+
+Requires [Prism](https://github.com/ruby/prism) gem installed (for
+libprism source). Override with `PRISM_DIR=/path/to/prism`.
+
+CRuby is needed only for the initial bootstrap. After `make`, the
+entire pipeline runs without Ruby.
 
 ## Limitations
 
@@ -172,10 +172,10 @@ cc -O2 -Wno-all gen2.c -lm -o spinel_codegen
 
 ## Dependencies
 
-- **Parse time**: [libprism](https://github.com/ruby/prism) (C library),
-  or Prism gem (CRuby) as fallback
+- **Build time**: [libprism](https://github.com/ruby/prism) (C library),
+  CRuby (bootstrap only)
 - **Run time**: None. Generated binaries need only libc + libm.
-- **Regexp**: Programs using regex link with [oniguruma](https://github.com/kkos/oniguruma)
+- **Regexp**: Built-in engine, no external library needed.
 
 ## History
 
