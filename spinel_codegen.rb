@@ -93,6 +93,7 @@ class Compiler
     @cls_cmeth_ptypes = "".split(",")
     @cls_cmeth_returns = "".split(",")
     @cls_cmeth_bodies = "".split(",")
+    @cls_is_value_type = []
 
     # ---- Constants (parallel arrays) ----
     @const_names = "".split(",")
@@ -515,8 +516,6 @@ class Compiler
   end
 
   def set_array_field(nid, field, ids_str)
-    $stderr.print " "
-    $stderr.print " "
     if field == "body"
       @nd_stmts[nid] = ids_str
     end
@@ -2034,7 +2033,23 @@ class Compiler
       return 1
     end
     if is_obj_type(t) == 1
+      cname = t[4, t.length - 4]
+      ci = find_class_idx(cname)
+      if ci >= 0 && @cls_is_value_type[ci] == 1
+        return 0
+      end
       return 1
+    end
+    0
+  end
+
+  def is_value_type_obj(t)
+    if is_obj_type(t) == 1
+      cname = t[4, t.length - 4]
+      ci = find_class_idx(cname)
+      if ci >= 0 && @cls_is_value_type[ci] == 1
+        return 1
+      end
     end
     0
   end
@@ -2097,6 +2112,10 @@ class Compiler
     end
     if is_obj_type(t) == 1
       cname = t[4, t.length - 4]
+      ci = find_class_idx(cname)
+      if ci >= 0 && @cls_is_value_type[ci] == 1
+        return "sp_" + cname
+      end
       return "sp_" + cname + " *"
     end
     "mrb_int"
@@ -2138,6 +2157,9 @@ class Compiler
     end
     if type_is_pointer(t) == 1
       return "NULL"
+    end
+    if is_value_type_obj(t) == 1
+      return "{0}"
     end
     "0"
   end
@@ -2352,6 +2374,7 @@ class Compiler
 
     ci = @cls_names.length
     @cls_names.push(cname)
+    @cls_is_value_type.push(0)
     @cls_parents.push(parent)
     # Initialize struct fields as ivars
     ivar_names = ""
@@ -2413,7 +2436,6 @@ class Compiler
     @cls_cmeth_returns.push("")
     @cls_cmeth_bodies.push("")
     @cls_meth_has_yield.push("")
-    @needs_gc = 1
 
     # Collect class body
     body = @nd_body[nid]
@@ -3237,6 +3259,7 @@ class Compiler
     # Generate a synthetic class from Struct.new(:field1, :field2, ...)
     ci = @cls_names.length
     @cls_names.push(cname)
+    @cls_is_value_type.push(0)
     @cls_parents.push("")
     @cls_ivar_names.push("")
     @cls_ivar_types.push("")
@@ -3254,7 +3277,6 @@ class Compiler
     @cls_cmeth_returns.push("")
     @cls_cmeth_bodies.push("")
     @cls_meth_has_yield.push("")
-    @needs_gc = 1
 
     # Get field names from symbol args (skip keyword_init hash)
     args_id = @nd_arguments[call_nid]
@@ -5906,6 +5928,8 @@ class Compiler
   def generate_code
     stmts = get_body_stmts(@root_id)
 
+    detect_value_types
+    recalc_needs_gc
     emit_header
     if @needs_gc == 1
       emit_gc_runtime
@@ -6487,6 +6511,512 @@ class Compiler
     end
   end
 
+  def is_value_type_ivar(t)
+    if t == "int" || t == "float" || t == "bool" || t == "string"
+      return 1
+    end
+    if is_obj_type(t) == 1
+      cname = t[4, t.length - 4]
+      ci2 = find_class_idx(cname)
+      if ci2 >= 0
+        if @cls_is_value_type[ci2] == 1
+          return 1
+        end
+      end
+    end
+    0
+  end
+
+  def self_arrow
+    if @current_class_idx >= 0
+      if @cls_is_value_type[@current_class_idx] == 1
+        return "self."
+      end
+    end
+    "self->"
+  end
+
+  def check_ivar_write_child(child_nid)
+    if child_nid >= 0
+      if subtree_has_ivar_write(child_nid) == 1
+        return 1
+      end
+    end
+    0
+  end
+
+  def check_ivar_write_list(list_str)
+    if list_str != ""
+      parts = list_str.split(",")
+      pi = 0
+      while pi < parts.length
+        id = parts[pi].to_i
+        if id > 0 && subtree_has_ivar_write(id) == 1
+          return 1
+        end
+        pi = pi + 1
+      end
+    end
+    0
+  end
+
+  def subtree_has_ivar_write(nid)
+    if nid < 0 || nid >= @nd_count
+      return 0
+    end
+    t = @nd_type[nid]
+    if t == "InstanceVariableWriteNode" || t == "InstanceVariableOperatorWriteNode" || t == "InstanceVariableTargetNode"
+      return 1
+    end
+    # Check integer child references
+    if check_ivar_write_child(@nd_body[nid]) == 1; return 1; end
+    if check_ivar_write_child(@nd_expression[nid]) == 1; return 1; end
+    if check_ivar_write_child(@nd_predicate[nid]) == 1; return 1; end
+    if check_ivar_write_child(@nd_subsequent[nid]) == 1; return 1; end
+    if check_ivar_write_child(@nd_else_clause[nid]) == 1; return 1; end
+    if check_ivar_write_child(@nd_left[nid]) == 1; return 1; end
+    if check_ivar_write_child(@nd_right[nid]) == 1; return 1; end
+    if check_ivar_write_child(@nd_target[nid]) == 1; return 1; end
+    if check_ivar_write_child(@nd_rescue_clause[nid]) == 1; return 1; end
+    if check_ivar_write_child(@nd_ensure_clause[nid]) == 1; return 1; end
+    if check_ivar_write_child(@nd_collection[nid]) == 1; return 1; end
+    if check_ivar_write_child(@nd_rest[nid]) == 1; return 1; end
+    if check_ivar_write_child(@nd_arguments[nid]) == 1; return 1; end
+    if check_ivar_write_child(@nd_block[nid]) == 1; return 1; end
+    # Check string-list children (comma-separated node IDs)
+    if check_ivar_write_list(@nd_stmts[nid]) == 1; return 1; end
+    if check_ivar_write_list(@nd_elements[nid]) == 1; return 1; end
+    if check_ivar_write_list(@nd_targets[nid]) == 1; return 1; end
+    0
+  end
+
+  def is_simple_writer_method(mn, bid)
+    # Check if method is a simple attr_writer pattern: def x=(v); @x = v; end
+    if mn.length <= 1 || mn[mn.length - 1] != "="
+      return 0
+    end
+    if bid < 0 || bid >= @nd_count
+      return 0
+    end
+    # Body should be a StatementsNode with a single InstanceVariableWriteNode
+    t = @nd_type[bid]
+    if t == "StatementsNode"
+      stmts = @nd_stmts[bid]
+      if stmts != ""
+        parts = stmts.split(",")
+        if parts.length == 1
+          sid = parts[0].to_i
+          if sid >= 0 && sid < @nd_count
+            if @nd_type[sid] == "InstanceVariableWriteNode"
+              return 1
+            end
+          end
+        end
+      end
+    end
+    # Body might be a single InstanceVariableWriteNode directly
+    if t == "InstanceVariableWriteNode"
+      return 1
+    end
+    0
+  end
+
+  def cls_has_self_mutating_methods(ci)
+    mnames_str = @cls_meth_names[ci]
+    if mnames_str == ""
+      return 0
+    end
+    mnames = mnames_str.split(";")
+    bodies = @cls_meth_bodies[ci].split(";")
+    writers = @cls_attr_writers[ci].split(";")
+    mi = 0
+    while mi < mnames.length
+      mn = mnames[mi]
+      if mn != "initialize"
+        # Skip registered attr_writers
+        is_writer = 0
+        bname = ""
+        if mn.length > 1 && mn[mn.length - 1] == "="
+          bname = mn[0, mn.length - 1]
+          wi = 0
+          while wi < writers.length
+            if writers[wi] == bname
+              is_writer = 1
+            end
+            wi = wi + 1
+          end
+        end
+        # Also skip simple writer methods: def x=(v); @x = v; end
+        if is_writer == 0 && mi < bodies.length
+          bid = bodies[mi].to_i
+          if is_simple_writer_method(mn, bid) == 1
+            is_writer = 1
+          end
+        end
+        if is_writer == 0 && mi < bodies.length
+          bid = bodies[mi].to_i
+          if bid >= 0 && subtree_has_ivar_write(bid) == 1
+            return 1
+          end
+        end
+      end
+      mi = mi + 1
+    end
+    0
+  end
+
+  def auto_register_attr_writers
+    # Detect manual attr_writer patterns: def x=(v); @x = v; end
+    # and register them as attr_writers for direct field access
+    i = 0
+    while i < @cls_names.length
+      mnames_str = @cls_meth_names[i]
+      if mnames_str != ""
+        mnames = mnames_str.split(";")
+        bodies = @cls_meth_bodies[i].split(";")
+        writers = @cls_attr_writers[i].split(";")
+        mi = 0
+        while mi < mnames.length
+          mn = mnames[mi]
+          bname = ""
+          if mn.length > 1 && mn[mn.length - 1] == "="
+            bname = mn[0, mn.length - 1]
+            # Check if already registered
+            already = 0
+            wi = 0
+            while wi < writers.length
+              if writers[wi] == bname
+                already = 1
+              end
+              wi = wi + 1
+            end
+            if already == 0 && mi < bodies.length
+              bid = bodies[mi].to_i
+              if is_simple_writer_method(mn, bid) == 1
+                append_attr_writer(i, bname)
+                # Also ensure the corresponding reader exists
+                readers = @cls_attr_readers[i].split(";")
+                has_reader = 0
+                ri = 0
+                while ri < readers.length
+                  if readers[ri] == bname
+                    has_reader = 1
+                  end
+                  ri = ri + 1
+                end
+              end
+            end
+          end
+          mi = mi + 1
+        end
+      end
+      i = i + 1
+    end
+  end
+
+  def is_simple_reader_method(mn, bid)
+    # Check if method is a simple attr_reader pattern: def x; @x; end
+    if bid < 0 || bid >= @nd_count
+      return 0
+    end
+    t = @nd_type[bid]
+    if t == "StatementsNode"
+      stmts = @nd_stmts[bid]
+      if stmts != ""
+        parts = stmts.split(",")
+        if parts.length == 1
+          sid = parts[0].to_i
+          if sid >= 0 && sid < @nd_count
+            if @nd_type[sid] == "InstanceVariableReadNode"
+              iname = @nd_name[sid]
+              if iname == "@" + mn
+                return 1
+              end
+            end
+          end
+        end
+      end
+    end
+    if t == "InstanceVariableReadNode"
+      iname = @nd_name[bid]
+      if iname == "@" + mn
+        return 1
+      end
+    end
+    0
+  end
+
+  def auto_register_attr_readers
+    i = 0
+    while i < @cls_names.length
+      mnames_str = @cls_meth_names[i]
+      if mnames_str != ""
+        mnames = mnames_str.split(";")
+        bodies = @cls_meth_bodies[i].split(";")
+        readers = @cls_attr_readers[i].split(";")
+        mi = 0
+        while mi < mnames.length
+          mn = mnames[mi]
+          if mn != "initialize" && mn.length > 0 && mn[mn.length - 1] != "="
+            already = 0
+            ri = 0
+            while ri < readers.length
+              if readers[ri] == mn
+                already = 1
+              end
+              ri = ri + 1
+            end
+            if already == 0 && mi < bodies.length
+              bid = bodies[mi].to_i
+              if is_simple_reader_method(mn, bid) == 1
+                append_attr_reader(i, mn)
+              end
+            end
+          end
+          mi = mi + 1
+        end
+      end
+      i = i + 1
+    end
+  end
+
+  def check_setter_on_params_child(child_nid, param_names)
+    if child_nid >= 0
+      r = subtree_has_setter_on_params(child_nid, param_names)
+      if r != ""
+        return r
+      end
+    end
+    ""
+  end
+
+  def check_setter_on_params_list(list_str, param_names)
+    if list_str != ""
+      parts = list_str.split(",")
+      pi2 = 0
+      while pi2 < parts.length
+        id = parts[pi2].to_i
+        if id > 0
+          r = subtree_has_setter_on_params(id, param_names)
+          if r != ""
+            return r
+          end
+        end
+        pi2 = pi2 + 1
+      end
+    end
+    ""
+  end
+
+  def subtree_has_setter_on_params(nid, param_names)
+    if nid < 0 || nid >= @nd_count
+      return ""
+    end
+    t = @nd_type[nid]
+    # Check: CallNode with setter name, receiver is a param
+    if t == "CallNode"
+      mn = @nd_name[nid]
+      if mn != "" && mn.length > 1 && mn[mn.length - 1] == "="
+        recv = @nd_receiver[nid]
+        if recv >= 0 && @nd_type[recv] == "LocalVariableReadNode"
+          vname = @nd_name[recv]
+          pi2 = 0
+          while pi2 < param_names.length
+            if param_names[pi2] == vname
+              return vname
+            end
+            pi2 = pi2 + 1
+          end
+        end
+      end
+    end
+    # Recurse into integer children
+    r = check_setter_on_params_child(@nd_body[nid], param_names)
+    if r != ""; return r; end
+    r = check_setter_on_params_child(@nd_expression[nid], param_names)
+    if r != ""; return r; end
+    r = check_setter_on_params_child(@nd_predicate[nid], param_names)
+    if r != ""; return r; end
+    r = check_setter_on_params_child(@nd_subsequent[nid], param_names)
+    if r != ""; return r; end
+    r = check_setter_on_params_child(@nd_else_clause[nid], param_names)
+    if r != ""; return r; end
+    r = check_setter_on_params_child(@nd_left[nid], param_names)
+    if r != ""; return r; end
+    r = check_setter_on_params_child(@nd_right[nid], param_names)
+    if r != ""; return r; end
+    r = check_setter_on_params_child(@nd_target[nid], param_names)
+    if r != ""; return r; end
+    r = check_setter_on_params_child(@nd_rescue_clause[nid], param_names)
+    if r != ""; return r; end
+    r = check_setter_on_params_child(@nd_ensure_clause[nid], param_names)
+    if r != ""; return r; end
+    r = check_setter_on_params_child(@nd_collection[nid], param_names)
+    if r != ""; return r; end
+    r = check_setter_on_params_child(@nd_rest[nid], param_names)
+    if r != ""; return r; end
+    r = check_setter_on_params_child(@nd_arguments[nid], param_names)
+    if r != ""; return r; end
+    r = check_setter_on_params_child(@nd_block[nid], param_names)
+    if r != ""; return r; end
+    # Recurse into string-list children
+    r = check_setter_on_params_list(@nd_stmts[nid], param_names)
+    if r != ""; return r; end
+    r = check_setter_on_params_list(@nd_elements[nid], param_names)
+    if r != ""; return r; end
+    r = check_setter_on_params_list(@nd_targets[nid], param_names)
+    if r != ""; return r; end
+    ""
+  end
+
+  def detect_param_mutated_types
+    # Find classes whose instances are mutated when passed as method parameters
+    @param_mutated_types = "".split(",")
+    i = 0
+    while i < @cls_names.length
+      mnames_str = @cls_meth_names[i]
+      if mnames_str != ""
+        mnames = mnames_str.split(";")
+        all_params = @cls_meth_params[i].split("|")
+        all_ptypes = @cls_meth_ptypes[i].split("|")
+        bodies = @cls_meth_bodies[i].split(";")
+        mi = 0
+        while mi < mnames.length
+          if mi < bodies.length && mi < all_params.length
+            bid = bodies[mi].to_i
+            pnames = all_params[mi].split(",")
+            ptypes = "".split(",")
+            if mi < all_ptypes.length
+              ptypes = all_ptypes[mi].split(",")
+            end
+            # Collect object-type param names
+            obj_param_names = "".split(",")
+            obj_param_types = "".split(",")
+            pj = 0
+            while pj < pnames.length
+              pt = "int"
+              if pj < ptypes.length
+                pt = ptypes[pj]
+              end
+              if is_obj_type(pt) == 1
+                obj_param_names.push(pnames[pj])
+                obj_param_types.push(pt)
+              end
+              pj = pj + 1
+            end
+            if obj_param_names.length > 0 && bid >= 0
+              mutated_name = subtree_has_setter_on_params(bid, obj_param_names)
+              if mutated_name != ""
+                # Find the type of the mutated param
+                pj = 0
+                while pj < obj_param_names.length
+                  if obj_param_names[pj] == mutated_name
+                    @param_mutated_types.push(obj_param_types[pj])
+                  end
+                  pj = pj + 1
+                end
+              end
+            end
+          end
+          mi = mi + 1
+        end
+      end
+      i = i + 1
+    end
+  end
+
+  def recalc_needs_gc
+    # Recalculate @needs_gc: only needed if non-value-type classes are used
+    # Save and reset, then re-enable if needed
+    saved = @needs_gc
+    @needs_gc = 0
+    # Non-value-type class exists → GC needed
+    i = 0
+    while i < @cls_names.length
+      if @cls_is_value_type[i] == 0
+        @needs_gc = 1
+      end
+      i = i + 1
+    end
+    # If there were other GC triggers (arrays, hashes, etc.) but no heap classes,
+    # those built-in types handle their own memory (malloc/free), not GC.
+    # However, IntArray/StrArray etc. ARE GC-allocated, so we need to check.
+    if @needs_gc == 0
+      if @needs_int_array == 1 || @needs_float_array == 1 || @needs_str_array == 1
+        @needs_gc = 1
+      end
+      if @needs_str_int_hash == 1 || @needs_str_str_hash == 1
+        @needs_gc = 1
+      end
+      if @needs_mutable_str == 1 || @needs_stringio == 1
+        @needs_gc = 1
+      end
+      if @needs_rb_value == 1 || @needs_lambda == 1
+        @needs_gc = 1
+      end
+    end
+  end
+
+  def detect_value_types
+    auto_register_attr_readers
+    auto_register_attr_writers
+    detect_param_mutated_types
+    # Multiple passes: value type detection depends on other classes
+    2.times do
+      i = 0
+      while i < @cls_names.length
+        names = @cls_ivar_names[i].split(";")
+        types = @cls_ivar_types[i].split(";")
+        if names.length > 0 && names.length <= 4
+          all_val = 1
+          j = 0
+          while j < types.length
+            if is_value_type_ivar(types[j]) == 0
+              all_val = 0
+            end
+            j = j + 1
+          end
+          # Exclude classes with self-mutating methods
+          if all_val == 1
+            if cls_has_self_mutating_methods(i) == 1
+              all_val = 0
+            end
+          end
+          # Exclude classes involved in inheritance
+          if all_val == 1
+            # Has a parent class
+            if @cls_parents[i] != ""
+              all_val = 0
+            end
+            # Has subclasses
+            si = 0
+            while si < @cls_names.length
+              if @cls_parents[si] == @cls_names[i]
+                all_val = 0
+              end
+              si = si + 1
+            end
+          end
+          # Exclude classes whose instances are param-mutated
+          if all_val == 1
+            type_str = "obj_" + @cls_names[i]
+            pmi = 0
+            while pmi < @param_mutated_types.length
+              if @param_mutated_types[pmi] == type_str
+                all_val = 0
+              end
+              pmi = pmi + 1
+            end
+          end
+          if all_val == 1
+            @cls_is_value_type[i] = 1
+          end
+        end
+        i = i + 1
+      end
+    end
+  end
+
   def emit_class_structs
     # Forward declare typedefs
     i = 0
@@ -6593,6 +7123,9 @@ class Compiler
 
   def ivar_is_gc_ptr(t)
     if is_obj_type(t) == 1
+      if is_value_type_obj(t) == 1
+        return 0
+      end
       return 1
     end
     if type_is_pointer(t) == 1
@@ -6686,7 +7219,11 @@ class Compiler
       cname = @cls_names[i]
       # Constructor
       init_idx = cls_find_method_direct(i, "initialize")
-      emit_raw("static sp_" + cname + " *sp_" + cname + "_new(" + constructor_params_decl(i) + ");")
+      if @cls_is_value_type[i] == 1
+        emit_raw("static sp_" + cname + " sp_" + cname + "_new(" + constructor_params_decl(i) + ");")
+      else
+        emit_raw("static sp_" + cname + " *sp_" + cname + "_new(" + constructor_params_decl(i) + ");")
+      end
       if init_idx >= 0
         emit_raw("static void sp_" + cname + "_initialize(sp_" + cname + " *self" + init_params_decl(i) + ");")
       end
@@ -6706,7 +7243,11 @@ class Compiler
           if cls_method_has_yield(i, j) == 1
             yp = yield_params_suffix_cls(i, j)
           end
-          emit_raw("static " + c_type(rt) + " sp_" + cname + "_" + sanitize_name(mnames[j]) + "(sp_" + cname + " *self" + method_with_self_params(j, all_params, all_ptypes) + yp + ");")
+          sp = " *self"
+          if @cls_is_value_type[i] == 1
+            sp = " self"
+          end
+          emit_raw("static " + c_type(rt) + " sp_" + cname + "_" + sanitize_name(mnames[j]) + "(sp_" + cname + sp + method_with_self_params(j, all_params, all_ptypes) + yp + ");")
         end
         j = j + 1
       end
@@ -7022,14 +7563,19 @@ class Compiler
   def emit_constructor(ci)
     cname = @cls_names[ci]
     init_idx = cls_find_method_direct(ci, "initialize")
-    emit_raw("static sp_" + cname + " *sp_" + cname + "_new(" + constructor_params_decl(ci) + ") {")
-    emit_raw("  SP_GC_SAVE();")
-    scan_fn = "NULL"
-    if class_has_ptr_ivars(ci) == 1
-      scan_fn = "sp_" + cname + "_gc_scan"
+    if @cls_is_value_type[ci] == 1
+      emit_raw("static sp_" + cname + " sp_" + cname + "_new(" + constructor_params_decl(ci) + ") {")
+      emit_raw("  sp_" + cname + " self = {0};")
+    else
+      emit_raw("static sp_" + cname + " *sp_" + cname + "_new(" + constructor_params_decl(ci) + ") {")
+      emit_raw("  SP_GC_SAVE();")
+      scan_fn = "NULL"
+      if class_has_ptr_ivars(ci) == 1
+        scan_fn = "sp_" + cname + "_gc_scan"
+      end
+      emit_raw("  sp_" + cname + " *self = (sp_" + cname + " *)sp_gc_alloc(sizeof(sp_" + cname + "), NULL, " + scan_fn + ");")
+      emit_raw("  SP_GC_ROOT(self);")
     end
-    emit_raw("  sp_" + cname + " *self = (sp_" + cname + " *)sp_gc_alloc(sizeof(sp_" + cname + "), NULL, " + scan_fn + ");")
-    emit_raw("  SP_GC_ROOT(self);")
 
     # Root pointer-type constructor parameters
     if init_idx >= 0
@@ -7074,7 +7620,11 @@ class Compiler
         end
         sk = 0
         while sk < pnames2.length
-          emit_raw("  self->" + pnames2[sk] + " = lv_" + pnames2[sk] + ";")
+          sa = "->"
+          if @cls_is_value_type[ci] == 1
+            sa = "."
+          end
+          emit_raw("  self" + sa + pnames2[sk] + " = lv_" + pnames2[sk] + ";")
           sk = sk + 1
         end
       end
@@ -7127,7 +7677,7 @@ class Compiler
           if @nd_type[sid] == "InstanceVariableWriteNode"
             ivar = sanitize_ivar(@nd_name[sid])
             val = compile_expr(@nd_expression[sid])
-            emit_raw("  self->" + ivar + " = " + val + ";")
+            emit_raw("  " + self_arrow + ivar + " = " + val + ";")
           else
             if @nd_type[sid] != "SuperNode"
               # Compile other statements (e.g., method calls like @arr[0] = val)
@@ -7166,13 +7716,17 @@ class Compiler
       end
     end
 
-    emit_raw("  SP_GC_RESTORE();")
+    if @cls_is_value_type[ci] == 0
+      emit_raw("  SP_GC_RESTORE();")
+    end
     emit_raw("  return self;")
     emit_raw("}")
     emit_raw("")
 
-    # Initialize function (for super calls)
+    # Initialize function (for super calls) - always uses *self (pointer)
     if init_idx >= 0
+      saved_vt = @cls_is_value_type[ci]
+      @cls_is_value_type[ci] = 0
       emit_raw("static void sp_" + cname + "_initialize(sp_" + cname + " *self" + init_params_decl(ci) + ") {")
       bodies = @cls_meth_bodies[ci].split(";")
       bid = -1
@@ -7207,7 +7761,7 @@ class Compiler
           if @nd_type[sid] == "InstanceVariableWriteNode"
             ivar = sanitize_ivar(@nd_name[sid])
             val = compile_expr(@nd_expression[sid])
-            emit_raw("  self->" + ivar + " = " + val + ";")
+            emit_raw("  " + self_arrow + ivar + " = " + val + ";")
           end
         }
         pop_scope
@@ -7215,6 +7769,7 @@ class Compiler
       end
       emit_raw("}")
       emit_raw("")
+      @cls_is_value_type[ci] = saved_vt
     end
   end
 
@@ -7239,7 +7794,11 @@ class Compiler
     if @in_yield_method == 1
       yp = yield_params_suffix_cls(ci, midx)
     end
-    emit_raw("static " + c_type(rt) + " sp_" + cname + "_" + sanitize_name(mname) + "(sp_" + cname + " *self" + build_params_str(pnames, ptypes) + yp + ") {")
+    if @cls_is_value_type[ci] == 1
+      emit_raw("static " + c_type(rt) + " sp_" + cname + "_" + sanitize_name(mname) + "(sp_" + cname + " self" + build_params_str(pnames, ptypes) + yp + ") {")
+    else
+      emit_raw("static " + c_type(rt) + " sp_" + cname + "_" + sanitize_name(mname) + "(sp_" + cname + " *self" + build_params_str(pnames, ptypes) + yp + ") {")
+    end
 
     push_scope
     j = 0
@@ -7261,7 +7820,9 @@ class Compiler
         end
       end
       if @in_gc_scope == 1
-        emit("  SP_GC_ROOT(self);")
+        if @cls_is_value_type[ci] == 0
+          emit("  SP_GC_ROOT(self);")
+        end
         j = 0
         while j < pnames.length
           if j < ptypes.length
@@ -8063,7 +8624,7 @@ class Compiler
         end
         mi3 = mi3 + 1
       end
-      return "self->" + sanitize_ivar(@nd_name[nid])
+      return self_arrow + sanitize_ivar(@nd_name[nid])
     end
     if t == "InstanceVariableWriteNode"
       val = compile_expr(@nd_expression[nid])
@@ -8083,7 +8644,7 @@ class Compiler
         end
         mi3 = mi3 + 1
       end
-      return "(self->" + sanitize_ivar(@nd_name[nid]) + " = " + val + ")"
+      return "(" + self_arrow + sanitize_ivar(@nd_name[nid]) + " = " + val + ")"
     end
     if t == "ConstantReadNode"
       if @nd_name[nid] == "ARGV"
@@ -8938,7 +9499,7 @@ class Compiler
       rk = 0
       while rk < readers.length
         if readers[rk] == mname
-          return "self->" + sanitize_ivar(mname)
+          return self_arrow + sanitize_ivar(mname)
         end
         rk = rk + 1
       end
@@ -10360,12 +10921,16 @@ class Compiler
       cname = recv_type[4, recv_type.length - 4]
       ci = find_class_idx(cname)
       if ci >= 0
+        arrow = "->"
+        if @cls_is_value_type[ci] == 1
+          arrow = "."
+        end
         # attr_reader
         readers = @cls_attr_readers[ci].split(";")
         j = 0
         while j < readers.length
           if readers[j] == mname
-            return rc + "->" + mname
+            return rc + arrow + mname
           end
           j = j + 1
         end
@@ -10377,7 +10942,7 @@ class Compiler
             j = 0
             while j < writers.length
               if writers[j] == bname
-                return "(" + rc + "->" + bname + " = " + compile_arg0(nid) + ")"
+                return "(" + rc + arrow + bname + " = " + compile_arg0(nid) + ", 0)"
               end
               j = j + 1
             end
@@ -11123,7 +11688,7 @@ class Compiler
         mi3 = mi3 + 1
       end
       if mod_ivar == 0
-        emit("  self->" + sanitize_ivar(@nd_name[nid]) + " = " + val + ";")
+        emit("  " + self_arrow + sanitize_ivar(@nd_name[nid]) + " = " + val + ";")
       end
       return
     end
@@ -11132,10 +11697,10 @@ class Compiler
       val = compile_expr(@nd_expression[nid])
       ivar = sanitize_ivar(@nd_name[nid])
       if op == "+"
-        emit("  self->" + ivar + " += " + val + ";")
+        emit("  " + self_arrow + ivar + " += " + val + ";")
       end
       if op == "-"
-        emit("  self->" + ivar + " -= " + val + ";")
+        emit("  " + self_arrow + ivar + " -= " + val + ";")
       end
       return
     end
@@ -11258,7 +11823,7 @@ class Compiler
               mi3 = mi3 + 1
             end
             if mod_ivar == 0
-              emit("  self->" + sanitize_ivar(iname) + " = " + tmps[k] + ";")
+              emit("  " + self_arrow + sanitize_ivar(iname) + " = " + tmps[k] + ";")
             end
           end
         end
@@ -11810,7 +12375,7 @@ class Compiler
             return 1
           end
           if @nd_type[recv] == "InstanceVariableReadNode"
-            emit("  self->" + sanitize_ivar(@nd_name[recv]) + " = sp_str_concat(self->" + sanitize_ivar(@nd_name[recv]) + ", " + val + ");")
+            emit("  " + self_arrow + sanitize_ivar(@nd_name[recv]) + " = sp_str_concat(self->" + sanitize_ivar(@nd_name[recv]) + ", " + val + ");")
             return 1
           end
         end
@@ -11834,7 +12399,7 @@ class Compiler
             return 1
           end
           if @nd_type[recv] == "InstanceVariableReadNode"
-            emit("  self->" + sanitize_ivar(@nd_name[recv]) + " = " + val + ";")
+            emit("  " + self_arrow + sanitize_ivar(@nd_name[recv]) + " = " + val + ";")
             return 1
           end
         end
@@ -11856,7 +12421,7 @@ class Compiler
             return 1
           end
           if @nd_type[recv] == "InstanceVariableReadNode"
-            emit("  self->" + sanitize_ivar(@nd_name[recv]) + " = \"\";")
+            emit("  " + self_arrow + sanitize_ivar(@nd_name[recv]) + " = \"\";")
             return 1
           end
         end
@@ -12152,7 +12717,11 @@ class Compiler
           rt = infer_type(recv)
           if is_obj_type(rt) == 1
             rc = compile_expr(recv)
-            emit("  " + rc + "->" + bname + " = " + compile_arg0(nid) + ";")
+            arrow2 = "->"
+            if is_value_type_obj(rt) == 1
+              arrow2 = "."
+            end
+            emit("  " + rc + arrow2 + bname + " = " + compile_arg0(nid) + ";")
             return 1
           end
         end
