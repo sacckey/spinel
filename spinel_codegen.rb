@@ -1731,6 +1731,29 @@ class Compiler
         end
       end
     end
+    # User-defined class methods
+    if recv >= 0
+      if @nd_type[recv] == "ConstantReadNode"
+        rcname = @nd_name[recv]
+        ci2 = find_class_idx(rcname)
+        if ci2 >= 0
+          if mname == "new"
+            return "obj_" + rcname
+          end
+          cmnames = @cls_cmeth_names[ci2].split(";")
+          cm_returns = @cls_cmeth_returns[ci2].split(";")
+          cj = 0
+          while cj < cmnames.length
+            if cmnames[cj] == mname
+              if cj < cm_returns.length && cm_returns[cj] != "" && cm_returns[cj] != "int"
+                return cm_returns[cj]
+              end
+            end
+            cj = cj + 1
+          end
+        end
+      end
+    end
     # StringIO methods
     if recv >= 0
       rt = infer_type(recv)
