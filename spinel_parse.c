@@ -755,8 +755,8 @@ static char *read_file(const char *path) {
   long len = ftell(f);
   fseek(f, 0, SEEK_SET);
   char *buf = malloc(len + 1);
-  fread(buf, 1, len, f);
-  buf[len] = '\0';
+  size_t nread = fread(buf, 1, len, f);
+  buf[nread] = '\0';
   fclose(f);
   return buf;
 }
