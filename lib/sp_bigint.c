@@ -5357,27 +5357,30 @@ int64_t sp_bigint_to_int(sp_Bigint *b) {
 const char *sp_bigint_to_s(sp_Bigint *b) {
   sp_bigint_init_ctx();
   mpz_t *z = &b->mpz;
-  if (z->sz == 0 || (z->sz == 1 && z->p[0] == 0)) {
-    char *s = (char*)malloc(2); s[0] = '0'; s[1] = 0; return s;
+  /* Small number fast path */
+  if (z->sz <= 2) {
+    int64_t v = sp_bigint_to_int(b);
+    char *s = (char*)malloc(24);
+    snprintf(s, 24, "%lld", (long long)v);
+    return s;
   }
+  /* Large number: use mpz_sizeinbase for allocation, repeated div/mod for digits */
   size_t est = mpz_sizeinbase(z, 10) + 2;
-  char *buf = (char*)malloc(est);
-  char *p = buf + est - 1;
+  char *buf = (char*)malloc(est + 1);
+  char *p = buf + est;
   *p = 0;
-  mpz_t tmp;
+  mpz_t tmp, rem, ten;
   mpz_init_set(sp_mpz_ctx, &tmp, z);
   if (tmp.sn < 0) tmp.sn = 1;
-  mpz_t ten, rem;
   mpz_init_set_int(sp_mpz_ctx, &ten, 10);
   mpz_init(sp_mpz_ctx, &rem);
-  while (mpz_cmp(sp_mpz_ctx, &tmp, &ten) >= 0 || (tmp.sz > 0 && !(tmp.sz == 1 && tmp.p[0] == 0))) {
+  while (tmp.sz > 0 && !(tmp.sz == 1 && tmp.p[0] == 0)) {
     mpz_mmod(sp_mpz_ctx, &rem, &tmp, &ten);
     int digit = (rem.sz > 0) ? (int)(rem.p[0]) : 0;
     *--p = '0' + digit;
     mpz_mdiv(sp_mpz_ctx, &tmp, &tmp, &ten);
-    if (tmp.sz == 0 || (tmp.sz == 1 && tmp.p[0] == 0)) break;
   }
-  if (p == buf + est - 1 || *p == 0) *--p = '0';
+  if (*p == 0) *--p = '0';
   if (z->sn < 0) *--p = '-';
   char *result = (char*)malloc(strlen(p) + 1);
   strcpy(result, p);

@@ -155,6 +155,7 @@ class Compiler
 
     # Fiber support
     @needs_fiber = 0
+    @needs_bigint = 0
     @fiber_counter = 0
     @fiber_funcs = ""
     @in_fiber_body = 0
@@ -1208,6 +1209,24 @@ class Compiler
   end
 
   def infer_operator_type(nid, mname, recv)
+    # Bigint operators return bigint
+    if recv >= 0
+      lt = infer_type(recv)
+      if lt == "bigint"
+        if mname == "+" || mname == "-" || mname == "*" || mname == "/" || mname == "%"
+          return "bigint"
+        end
+      end
+      args_id = @nd_arguments[nid]
+      if args_id >= 0
+        aargs = parse_id_list(@nd_args[args_id])
+        if aargs.length > 0 && infer_type(aargs[0]) == "bigint"
+          if mname == "+" || mname == "-" || mname == "*" || mname == "/" || mname == "%"
+            return "bigint"
+          end
+        end
+      end
+    end
     if mname == "+"
       if recv >= 0
         lt = infer_type(recv)
@@ -2218,7 +2237,7 @@ class Compiler
     if bt == "stringio" || bt == "lambda" || bt == "poly_array"
       return 1
     end
-    if bt == "fiber"
+    if bt == "fiber" || bt == "bigint"
       return 1
     end
     if is_obj_type(bt) == 1
@@ -2248,6 +2267,9 @@ class Compiler
     end
     if t == "int"
       return "mrb_int"
+    end
+    if t == "bigint"
+      return "sp_Bigint *"
     end
     if t == "float"
       return "mrb_float"
@@ -2324,6 +2346,9 @@ class Compiler
     end
     if t == "int"
       return "0"
+    end
+    if t == "bigint"
+      return "NULL"
     end
     if t == "float"
       return "0.0"
@@ -6325,6 +6350,8 @@ class Compiler
     end
     # Fix lambda return types based on call-site usage
     fix_lambda_return_types
+    # Pre-detect bigint variables before feature detection
+    pre_detect_bigint
     detect_features
     generate_code
   end
@@ -6462,6 +6489,23 @@ class Compiler
       end
       emit_fiber_runtime
     end
+    if @needs_bigint == 1
+      emit_raw("/* Bigint (linked from sp_bigint.o) */")
+      emit_raw("typedef struct sp_Bigint sp_Bigint;")
+      emit_raw("sp_Bigint *sp_bigint_new_int(int64_t v);")
+      emit_raw("sp_Bigint *sp_bigint_new_str(const char *s, int base);")
+      emit_raw("sp_Bigint *sp_bigint_add(sp_Bigint *a, sp_Bigint *b);")
+      emit_raw("sp_Bigint *sp_bigint_sub(sp_Bigint *a, sp_Bigint *b);")
+      emit_raw("sp_Bigint *sp_bigint_mul(sp_Bigint *a, sp_Bigint *b);")
+      emit_raw("sp_Bigint *sp_bigint_div(sp_Bigint *a, sp_Bigint *b);")
+      emit_raw("sp_Bigint *sp_bigint_mod(sp_Bigint *a, sp_Bigint *b);")
+      emit_raw("sp_Bigint *sp_bigint_pow(sp_Bigint *base, int64_t exp);")
+      emit_raw("int sp_bigint_cmp(sp_Bigint *a, sp_Bigint *b);")
+      emit_raw("int64_t sp_bigint_to_int(sp_Bigint *b);")
+      emit_raw("const char *sp_bigint_to_s(sp_Bigint *b);")
+      emit_raw("void sp_bigint_free(sp_Bigint *b);")
+      emit_raw("")
+    end
     emit_class_structs
     emit_gc_scan_functions
     emit_forward_decls
@@ -6518,6 +6562,210 @@ class Compiler
       emit_raw("static int sp_last_status = 0;")
     end
     emit_raw("")
+  end
+
+  def pre_detect_bigint
+    stmts = get_body_stmts(@root_id)
+    bigint_names = "".split(",")
+    stmts.each { |sid|
+      scan_bigint_candidates(sid, bigint_names)
+    }
+    if bigint_names.length > 0
+      @needs_bigint = 1
+    end
+  end
+
+  # Detect variables that need bigint promotion
+  # Pattern: x = x * y (or x *= y) inside a while loop
+  def detect_bigint_vars(stmts, names, types)
+    bigint_names = "".split(",")
+    stmts.each { |sid|
+      scan_bigint_candidates(sid, bigint_names)
+    }
+    k = 0
+    while k < bigint_names.length
+      ni = 0
+      while ni < names.length
+        if names[ni] == bigint_names[k]
+          if types[ni] == "int"
+            types[ni] = "bigint"
+            @needs_bigint = 1
+          end
+        end
+        ni = ni + 1
+      end
+      k = k + 1
+    end
+    # Promote all int variables in the same scope that interact with bigint
+    if @needs_bigint == 1
+      scan_bigint_propagate(stmts, names, types)
+    end
+  end
+
+  def scan_bigint_candidates(nid, bigint_names)
+    if nid < 0
+      return
+    end
+    # x *= y inside while — candidate
+    if @nd_type[nid] == "WhileNode"
+      body = @nd_body[nid]
+      if body >= 0
+        scan_bigint_in_loop(body, bigint_names)
+      end
+    end
+    # Recurse
+    if @nd_body[nid] >= 0
+      scan_bigint_candidates(@nd_body[nid], bigint_names)
+    end
+    stmts = parse_id_list(@nd_stmts[nid])
+    k = 0
+    while k < stmts.length
+      scan_bigint_candidates(stmts[k], bigint_names)
+      k = k + 1
+    end
+  end
+
+  def scan_bigint_in_loop(nid, bigint_names)
+    if nid < 0
+      return
+    end
+    # x = x * y pattern
+    if @nd_type[nid] == "LocalVariableWriteNode"
+      lname = @nd_name[nid]
+      expr = @nd_expression[nid]
+      if expr >= 0 && @nd_type[expr] == "CallNode"
+        op = @nd_name[expr]
+        if op == "*"
+          recv = @nd_receiver[expr]
+          if recv >= 0 && @nd_type[recv] == "LocalVariableReadNode"
+            if @nd_name[recv] == lname
+              if not_in(lname, bigint_names) == 1
+                bigint_names.push(lname)
+              end
+            end
+          end
+        end
+      end
+    end
+    # x *= y pattern
+    if @nd_type[nid] == "LocalVariableOperatorWriteNode"
+      if @nd_binop[nid] == "*"
+        lname = @nd_name[nid]
+        if not_in(lname, bigint_names) == 1
+          bigint_names.push(lname)
+        end
+      end
+    end
+    # Recurse into loop body
+    if @nd_body[nid] >= 0
+      scan_bigint_in_loop(@nd_body[nid], bigint_names)
+    end
+    stmts = parse_id_list(@nd_stmts[nid])
+    k = 0
+    while k < stmts.length
+      scan_bigint_in_loop(stmts[k], bigint_names)
+      k = k + 1
+    end
+    if @nd_subsequent[nid] >= 0
+      scan_bigint_in_loop(@nd_subsequent[nid], bigint_names)
+    end
+  end
+
+  def scan_bigint_propagate(stmts, names, types)
+    # Propagate: if x is bigint and y = expr involving x, y becomes bigint
+    changed = 1
+    while changed == 1
+      changed = 0
+      stmts.each { |sid|
+        changed = propagate_bigint_node(sid, names, types, changed)
+      }
+    end
+  end
+
+  def expr_uses_bigint(nid, names, types)
+    if nid < 0
+      return 0
+    end
+    if @nd_type[nid] == "LocalVariableReadNode"
+      vn = @nd_name[nid]
+      i = 0
+      while i < names.length
+        if names[i] == vn && types[i] == "bigint"
+          return 1
+        end
+        i = i + 1
+      end
+      return 0
+    end
+    if @nd_type[nid] == "CallNode"
+      if @nd_receiver[nid] >= 0
+        if expr_uses_bigint(@nd_receiver[nid], names, types) == 1
+          return 1
+        end
+      end
+      args_id = @nd_arguments[nid]
+      if args_id != nil && args_id >= 0
+        aargs = get_args(args_id)
+        ak = 0
+        while ak < aargs.length
+          if expr_uses_bigint(aargs[ak], names, types) == 1
+            return 1
+          end
+          ak = ak + 1
+        end
+      end
+    end
+    if @nd_expression[nid] >= 0
+      if expr_uses_bigint(@nd_expression[nid], names, types) == 1
+        return 1
+      end
+    end
+    if @nd_body[nid] >= 0
+      if expr_uses_bigint(@nd_body[nid], names, types) == 1
+        return 1
+      end
+    end
+    # StatementsNode children
+    st = parse_id_list(@nd_stmts[nid])
+    si = 0
+    while si < st.length
+      if expr_uses_bigint(st[si], names, types) == 1
+        return 1
+      end
+      si = si + 1
+    end
+    0
+  end
+
+  def propagate_bigint_node(nid, names, types, changed)
+    if nid < 0
+      return changed
+    end
+    if @nd_type[nid] == "LocalVariableWriteNode"
+      lname = @nd_name[nid]
+      expr = @nd_expression[nid]
+      if expr >= 0 && expr_uses_bigint(expr, names, types) == 1
+        li = 0
+        while li < names.length
+          if names[li] == lname && types[li] == "int"
+            types[li] = "bigint"
+            @needs_bigint = 1
+            changed = 1
+          end
+          li = li + 1
+        end
+      end
+    end
+    if @nd_body[nid] >= 0
+      changed = propagate_bigint_node(@nd_body[nid], names, types, changed)
+    end
+    stmts = parse_id_list(@nd_stmts[nid])
+    k = 0
+    while k < stmts.length
+      changed = propagate_bigint_node(stmts[k], names, types, changed)
+      k = k + 1
+    end
+    changed
   end
 
   def emit_gc_runtime
@@ -9069,6 +9317,17 @@ class Compiler
       j = j + 1
     end
 
+    # Bigint promotion: variables with *= in while loops
+    detect_bigint_vars(stmts, lnames, ltypes)
+    # Update scope with bigint types
+    j = 0
+    while j < lnames.length
+      if ltypes[j] == "bigint"
+        set_var_type(lnames[j], "bigint")
+      end
+      j = j + 1
+    end
+
     vol = ""
     if @needs_setjmp == 1
       vol = "volatile "
@@ -10228,6 +10487,16 @@ class Compiler
       end
     end
 
+    # Bigint methods
+    if recv_type == "bigint"
+      if mname == "to_s"
+        return "sp_bigint_to_s(" + rc + ")"
+      end
+      if mname == "to_i"
+        return "sp_bigint_to_int(" + rc + ")"
+      end
+    end
+
     # Bool methods
     if recv_type == "bool"
       if mname == "to_s"
@@ -10646,7 +10915,75 @@ class Compiler
     ""
   end
 
+  def compile_bigint_arg(nid)
+    args_id = @nd_arguments[nid]
+    if args_id >= 0
+      arg_ids = get_args(args_id)
+      if arg_ids.length > 0
+        at = infer_type(arg_ids[0])
+        val = compile_expr(arg_ids[0])
+        if at == "bigint"
+          return val
+        end
+        return "sp_bigint_new_int(" + val + ")"
+      end
+    end
+    "sp_bigint_new_int(0)"
+  end
+
   def compile_operator_expr(nid, mname, recv)
+    # Bigint operators
+    lt = infer_type(recv)
+    if lt != "bigint"
+      # Check if argument is bigint
+      args_id = @nd_arguments[nid]
+      if args_id >= 0
+        aargs = get_args(args_id)
+        if aargs.length > 0 && infer_type(aargs[0]) == "bigint"
+          lt = "bigint"
+        end
+      end
+    end
+    if lt == "bigint"
+      rc_raw = compile_expr(recv)
+      rc = infer_type(recv) == "bigint" ? rc_raw : "sp_bigint_new_int(" + rc_raw + ")"
+      if mname == "+"
+        return "sp_bigint_add(" + rc + ", " + compile_bigint_arg(nid) + ")"
+      end
+      if mname == "-"
+        return "sp_bigint_sub(" + rc + ", " + compile_bigint_arg(nid) + ")"
+      end
+      if mname == "*"
+        return "sp_bigint_mul(" + rc + ", " + compile_bigint_arg(nid) + ")"
+      end
+      if mname == "/"
+        return "sp_bigint_div(" + rc + ", " + compile_bigint_arg(nid) + ")"
+      end
+      if mname == "%"
+        return "sp_bigint_mod(" + rc + ", " + compile_bigint_arg(nid) + ")"
+      end
+      if mname == "**"
+        return "sp_bigint_pow(" + rc + ", " + compile_arg0(nid) + ")"
+      end
+      if mname == ">"
+        return "(sp_bigint_cmp(" + rc + ", " + compile_bigint_arg(nid) + ") > 0)"
+      end
+      if mname == "<"
+        return "(sp_bigint_cmp(" + rc + ", " + compile_bigint_arg(nid) + ") < 0)"
+      end
+      if mname == ">="
+        return "(sp_bigint_cmp(" + rc + ", " + compile_bigint_arg(nid) + ") >= 0)"
+      end
+      if mname == "<="
+        return "(sp_bigint_cmp(" + rc + ", " + compile_bigint_arg(nid) + ") <= 0)"
+      end
+      if mname == "=="
+        return "(sp_bigint_cmp(" + rc + ", " + compile_bigint_arg(nid) + ") == 0)"
+      end
+      if mname == "!="
+        return "(sp_bigint_cmp(" + rc + ", " + compile_bigint_arg(nid) + ") != 0)"
+      end
+    end
     # Operators
     if mname == "**"
       lt = infer_type(recv)
@@ -12748,6 +13085,16 @@ class Compiler
           end
         end
       end
+      if vt == "bigint"
+        rhs_t = infer_type(@nd_expression[nid])
+        val = compile_expr(@nd_expression[nid])
+        if rhs_t == "bigint"
+          emit("  " + vref + " = " + val + ";")
+        else
+          emit("  " + vref + " = sp_bigint_new_int(" + val + ");")
+        end
+        return
+      end
       if vt == "poly"
         # Box the value
         emit("  " + vref + " = " + box_expr_to_poly(@nd_expression[nid]) + ";")
@@ -12779,6 +13126,24 @@ class Compiler
       op = @nd_binop[nid]
       val = compile_expr(@nd_expression[nid])
       vref = fiber_var_ref(@nd_name[nid])
+      vt = find_var_type(@nd_name[nid])
+      if vt == "bigint"
+        at = infer_type(@nd_expression[nid])
+        barg = at == "bigint" ? val : "sp_bigint_new_int(" + val + ")"
+        if op == "+"
+          emit("  " + vref + " = sp_bigint_add(" + vref + ", " + barg + ");")
+        end
+        if op == "-"
+          emit("  " + vref + " = sp_bigint_sub(" + vref + ", " + barg + ");")
+        end
+        if op == "*"
+          emit("  " + vref + " = sp_bigint_mul(" + vref + ", " + barg + ");")
+        end
+        if op == "/"
+          emit("  " + vref + " = sp_bigint_div(" + vref + ", " + barg + ");")
+        end
+        return
+      end
       if op == "+"
         emit("  " + vref + " += " + val + ";")
       end
@@ -14889,6 +15254,11 @@ class Compiler
         k = k + 1
         next
       end
+      if at == "bigint"
+        emit("  { const char *_bs = sp_bigint_to_s(" + val + "); fputs(_bs, stdout); putchar('" + bsl_n + "'); }")
+        k = k + 1
+        next
+      end
       if at == "int"
         emit("  printf(\"%lld" + bsl_n + "\", (long long)" + val + ");")
       else
@@ -14971,6 +15341,11 @@ class Compiler
       end
       at = infer_type(aid)
       val = compile_expr(aid)
+      if at == "bigint"
+        emit("  fputs(sp_bigint_to_s(" + val + "), stdout);")
+        k = k + 1
+        next
+      end
       if at == "int"
         emit("  printf(\"%lld\", (long long)" + val + ");")
       else
