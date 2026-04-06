@@ -7652,6 +7652,42 @@ class Compiler
       end
       i = i + 1
     end
+    # Also check toplevel functions
+    mi = 0
+    while mi < @meth_names.length
+      bid = @meth_body_ids[mi]
+      pnames = @meth_param_names[mi].split(",")
+      ptypes = @meth_param_types[mi].split(",")
+      obj_param_names = "".split(",")
+      obj_param_types = "".split(",")
+      pj = 0
+      while pj < pnames.length
+        pt = "int"
+        if pj < ptypes.length
+          pt = ptypes[pj]
+        end
+        if is_obj_type(pt) == 1
+          obj_param_names.push(pnames[pj])
+          obj_param_types.push(pt)
+        end
+        pj = pj + 1
+      end
+      if obj_param_names.length > 0 && bid >= 0
+        mutated_name = subtree_has_setter_on_params(bid, obj_param_names)
+        if mutated_name != ""
+          pj = 0
+          while pj < obj_param_names.length
+            if obj_param_names[pj] == mutated_name
+              if not_in(obj_param_types[pj], @param_mutated_types) == 1
+                @param_mutated_types.push(obj_param_types[pj])
+              end
+            end
+            pj = pj + 1
+          end
+        end
+      end
+      mi = mi + 1
+    end
   end
 
   def recalc_needs_gc
@@ -7703,9 +7739,13 @@ class Compiler
             end
             j = j + 1
           end
-          # Exclude classes with self-mutating methods
+          # Exclude classes with self-mutating methods or attr_writers
           if all_val == 1
             if cls_has_self_mutating_methods(i) == 1
+              all_val = 0
+            end
+            writers = @cls_attr_writers[i].split(";")
+            if writers.length > 0 && writers[0] != ""
               all_val = 0
             end
           end
