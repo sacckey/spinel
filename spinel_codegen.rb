@@ -5407,6 +5407,18 @@ class Compiler
         if not_in(gname, @gvar_names) == 1
           @gvar_names.push(gname)
           @gvar_types.push(gt)
+        else
+          # Check type consistency
+          gi = 0
+          while gi < @gvar_names.length
+            if @gvar_names[gi] == gname
+              if @gvar_types[gi] != gt && gt != "int" && gt != "nil"
+                $stderr.puts "Error: global variable " + gname + " type mismatch: " + @gvar_types[gi] + " vs " + gt
+                exit(1)
+              end
+            end
+            gi = gi + 1
+          end
         end
       end
     end
