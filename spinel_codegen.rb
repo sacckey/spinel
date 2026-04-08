@@ -5931,6 +5931,14 @@ class Compiler
                           elsif is_nullable_type(ct) == 0 && is_nullable_pointer_type(ct) == 1
                             ptypes[k] = ct + "?"
                           end
+                        elsif at == "nil" && is_nullable_pointer_type(ct) == 1
+                          # nil + T → T?
+                          if is_nullable_type(ct) == 0
+                            ptypes[k] = ct + "?"
+                          end
+                        elsif ct == "nil" && is_nullable_pointer_type(at) == 1
+                          # T + nil (ct was nil, at is T) → T?
+                          ptypes[k] = at + "?"
                         else
                           # Genuinely different types - mark poly
                           ptypes[k] = "poly"
