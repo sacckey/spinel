@@ -4860,6 +4860,26 @@ class Compiler
           declare_var(lnames[lk], ltypes[lk])
           lk = lk + 1
         end
+        # Second pass: upgrade nil/int types with better information
+        lnames2 = "".split(",")
+        ltypes2 = "".split(",")
+        scan_locals(@meth_body_ids[i], lnames2, ltypes2, pnames)
+        lk = 0
+        while lk < lnames2.length
+          mk = 0
+          while mk < lnames.length
+            if lnames[mk] == lnames2[lk]
+              if ltypes[mk] == "int" || ltypes[mk] == "nil"
+                if ltypes2[lk] != "int" && ltypes2[lk] != "nil"
+                  ltypes[mk] = ltypes2[lk]
+                  set_var_type(lnames[mk], ltypes2[lk])
+                end
+              end
+            end
+            mk = mk + 1
+          end
+          lk = lk + 1
+        end
       end
       rt = infer_body_return(@meth_body_ids[i])
       @meth_return_types[i] = rt
@@ -6334,6 +6354,40 @@ class Compiler
     end
   end
 
+  def fix_nil_ivar_self_refs
+    ci = 0
+    while ci < @cls_names.length
+      cname = @cls_names[ci]
+      writers = @cls_attr_writers[ci].split(";")
+      names = @cls_ivar_names[ci].split(";")
+      types = @cls_ivar_types[ci].split(";")
+      changed = 0
+      k = 0
+      while k < names.length
+        if k < types.length && (types[k] == "nil" || types[k] == "poly")
+          # Check if this ivar has an attr_writer
+          ibase = names[k]
+          if ibase.length > 1 && ibase[0] == "@"
+            ibase = ibase[1, ibase.length - 1]
+          end
+          wk = 0
+          while wk < writers.length
+            if writers[wk] == ibase
+              types[k] = "obj_" + cname + "?"
+              changed = 1
+            end
+            wk = wk + 1
+          end
+        end
+        k = k + 1
+      end
+      if changed == 1
+        @cls_ivar_types[ci] = types.join(";")
+      end
+      ci = ci + 1
+    end
+  end
+
   def compile
     collect_all
     infer_main_call_types
@@ -6348,6 +6402,12 @@ class Compiler
       detect_poly_params
       iter = iter + 1
     end
+    # Fix nil/poly-typed ivars with attr_writer to nullable self type
+    # e.g. @left = nil in Node with attr_accessor :left → obj_Node?
+    # Must run after iterative loop to override poly from type conflicts
+    fix_nil_ivar_self_refs
+    # Re-run returns with corrected ivar types
+    infer_all_returns
     # Fix lambda return types based on call-site usage
     fix_lambda_return_types
     # Pre-detect bigint variables before feature detection
@@ -9009,6 +9069,13 @@ class Compiler
                       end
                     elsif types[ki] == "nil" && is_nullable_pointer_type(at) == 1
                       types[ki] = at + "?"
+                    elsif base_type(types[ki]) == at
+                      # T? and T are compatible — keep T?
+                    elsif base_type(at) == types[ki]
+                      # T and T? → upgrade to T?
+                      types[ki] = at
+                    elsif base_type(types[ki]) == base_type(at)
+                      # T? and T? — same base
                     else
                       types[ki] = "poly"
                       @needs_rb_value = 1
@@ -9419,8 +9486,8 @@ class Compiler
       k = 0
       while k < lnames.length
         if lnames[k] == lnames2[j]
-          if ltypes[k] == "int"
-            if ltypes2[j] != "int"
+          if ltypes[k] == "int" || ltypes[k] == "nil"
+            if ltypes2[j] != "int" && ltypes2[j] != "nil"
               ltypes[k] = ltypes2[j]
               set_var_type(lnames[k], ltypes2[j])
             end
