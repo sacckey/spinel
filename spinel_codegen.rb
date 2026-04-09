@@ -9066,8 +9066,21 @@ class Compiler
           lname = @nd_name[tgt]
           if not_in(lname, names) == 1
             if not_in(lname, params) == 1
+              # Infer element type from collection
+              elem_type = "int"
+              coll = @nd_collection[nid]
+              if coll >= 0
+                ct = infer_type(coll)
+                if ct == "str_array"
+                  elem_type = "string"
+                elsif ct == "float_array"
+                  elem_type = "float"
+                elsif is_ptr_array_type(ct) == 1
+                  elem_type = ptr_array_elem_type(ct)
+                end
+              end
               names.push(lname)
-              types.push("int")
+              types.push(elem_type)
             end
           end
         end
