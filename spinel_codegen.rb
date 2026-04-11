@@ -1745,6 +1745,15 @@ class Compiler
     if mname == "fdiv"
       return "float"
     end
+    if mname == "nan?" || mname == "finite?"
+      return "bool"
+    end
+    if mname == "infinite?"
+      return "int"
+    end
+    if mname == "truncate"
+      return "int"
+    end
     if mname == "tally"
       return "str_int_hash"
     end
@@ -12104,6 +12113,21 @@ class Compiler
     end
     if mname == "abs"
       return "fabs(" + rc + ")"
+    end
+    if mname == "nan?"
+      return "(isnan(" + rc + ") ? TRUE : FALSE)"
+    end
+    if mname == "finite?"
+      return "(isfinite(" + rc + ") ? TRUE : FALSE)"
+    end
+    if mname == "infinite?"
+      return "(isinf(" + rc + ") ? (" + rc + " < 0 ? -1 : 1) : 0)"
+    end
+    if mname == "truncate"
+      return "(mrb_int)trunc(" + rc + ")"
+    end
+    if mname == "fdiv"
+      return "((" + rc + ") / (mrb_float)" + compile_arg0(nid) + ")"
     end
     ""
   end
