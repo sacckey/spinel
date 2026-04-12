@@ -1542,8 +1542,25 @@ class Compiler
     if mname == "clamp"
       return "int"
     end
-    if mname == "itself"
+    if mname == "itself" || mname == "tap"
       if recv >= 0
+        return infer_type(recv)
+      end
+      return "int"
+    end
+    if mname == "then" || mname == "yield_self"
+      # Return type is the block's return type
+      if recv >= 0
+        blk = @nd_block[nid]
+        if blk >= 0
+          bbody = @nd_body[blk]
+          if bbody >= 0
+            bbs = get_stmts(bbody)
+            if bbs.length > 0
+              return infer_type(bbs.last)
+            end
+          end
+        end
         return infer_type(recv)
       end
       return "int"
@@ -9418,6 +9435,9 @@ class Compiler
                     end
                   elsif mname == "each_char" || mname == "each_line"
                     types.push("string")
+                  elsif mname == "tap" || mname == "then" || mname == "yield_self"
+                    # Block param gets receiver type
+                    types.push(recv_type)
                   elsif mname == "each_with_object"
                     if bk == 0
                       # Element
@@ -12695,6 +12715,20 @@ class Compiler
           bp2 = "_obj"
         end
         return "lv_" + bp2
+      end
+    end
+
+    # tap: run block with receiver, return receiver
+    if mname == "tap"
+      if @nd_block[nid] >= 0
+        return compile_tap_expr(nid)
+      end
+    end
+
+    # then / yield_self: pass receiver to block, return block result
+    if mname == "then" || mname == "yield_self"
+      if @nd_block[nid] >= 0
+        return compile_then_expr(nid)
       end
     end
 
@@ -16755,6 +16789,57 @@ class Compiler
     @indent = @indent - 1
     emit("  }")
     @in_loop = old
+  end
+
+  def compile_tap_expr(nid)
+    # Execute block with receiver bound to block param, return receiver
+    rt = infer_type(@nd_receiver[nid])
+    rc = compile_expr(@nd_receiver[nid])
+    bp = get_block_param(nid, 0)
+    if bp == ""
+      bp = "_x"
+    end
+    declare_var(bp, rt)
+    tmp = new_temp
+    emit("  " + c_type(rt) + " " + tmp + " = " + rc + ";")
+    emit("  lv_" + bp + " = " + tmp + ";")
+    blk = @nd_block[nid]
+    bbody = @nd_body[blk]
+    if bbody >= 0
+      bs = get_stmts(bbody)
+      k = 0
+      while k < bs.length
+        compile_stmt(bs[k])
+        k = k + 1
+      end
+    end
+    tmp
+  end
+
+  def compile_then_expr(nid)
+    # Execute block with receiver bound to block param, return block result
+    rt = infer_type(@nd_receiver[nid])
+    rc = compile_expr(@nd_receiver[nid])
+    bp = get_block_param(nid, 0)
+    if bp == ""
+      bp = "_x"
+    end
+    declare_var(bp, rt)
+    emit("  lv_" + bp + " = " + rc + ";")
+    blk = @nd_block[nid]
+    bbody = @nd_body[blk]
+    if bbody >= 0
+      bs = get_stmts(bbody)
+      k = 0
+      while k < bs.length - 1
+        compile_stmt(bs[k])
+        k = k + 1
+      end
+      if bs.length > 0
+        return compile_expr(bs.last)
+      end
+    end
+    "0"
   end
 
   def compile_array_predicate_block(nid, rc, recv_type, mname)
