@@ -11,19 +11,26 @@
 class Compiler
   attr_accessor :out
 
-  def final_output
-    result = @out_lines.join(10.chr) + 10.chr
-    if @deferred_tuple != ""
-      result = result.gsub("/*TUPLE_INSERT_POINT*/", @deferred_tuple)
-    else
-      result = result.gsub("/*TUPLE_INSERT_POINT*/" + 10.chr, "")
+  def build_output
+    result = ""
+    i = 0
+    while i < @out_lines.length
+      line = @out_lines[i]
+      if line == "/*TUPLE_INSERT_POINT*/"
+        if @deferred_tuple != ""
+          result << @deferred_tuple
+        end
+      elsif line == "/*LAMBDA_INSERT_POINT*/"
+        if @deferred_lambda != ""
+          result << @deferred_lambda
+        end
+      else
+        result << line
+        result << 10.chr
+      end
+      i = i + 1
     end
-    if @deferred_lambda != ""
-      result = result.gsub("/*LAMBDA_INSERT_POINT*/", @deferred_lambda)
-    else
-      result = result.gsub("/*LAMBDA_INSERT_POINT*/" + 10.chr, "")
-    end
-    result
+    result + ""
   end
 
   def initialize
@@ -19644,9 +19651,9 @@ compiler = Compiler.new
 compiler.read_text_ast(data)
 compiler.compile
 
-final = compiler.final_output
+result = compiler.build_output
 if out_file != nil
-  File.write(out_file, final)
+  File.write(out_file, result)
 else
-  print final
+  print result
 end
