@@ -15484,6 +15484,14 @@ class Compiler
           emit("  sp_StrStrHash_delete(" + rc + ", " + compile_arg0(nid) + ");")
           return 1
         end
+        if rt == "int_array"
+          emit("  sp_IntArray_delete(" + rc + ", " + compile_arg0(nid) + ");")
+          return 1
+        end
+        if rt == "str_array"
+          emit("  sp_StrArray_delete(" + rc + ", " + compile_arg0(nid) + ");")
+          return 1
+        end
       end
     end
 
