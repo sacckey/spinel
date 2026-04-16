@@ -20,6 +20,10 @@
 typedef int64_t mrb_int;
 typedef double mrb_float;
 typedef bool mrb_bool;
+/* sp_sym is defined per-program in emit_sym_runtime, but poly helpers
+   below need to reference it by forward declaration. */
+typedef mrb_int sp_sym;
+static const char *sp_sym_to_s(sp_sym id);
 #ifndef TRUE
 #define TRUE true
 #endif
@@ -388,6 +392,7 @@ typedef uint64_t sp_RbValue;
 #define SP_TAG_BOOL 3
 #define SP_TAG_NIL  4
 #define SP_TAG_OBJ  5
+#define SP_TAG_SYM  6
 typedef struct { int tag; union { mrb_int i; const char *s; mrb_float f; mrb_bool b; void *p; int cls_id; } v; } sp_RbVal;
 static sp_RbVal sp_box_int(mrb_int v) { sp_RbVal r; r.tag = SP_TAG_INT; r.v.i = v; return r; }
 static sp_RbVal sp_box_str(const char *v) { sp_RbVal r; r.tag = SP_TAG_STR; r.v.s = v; return r; }
@@ -395,6 +400,7 @@ static sp_RbVal sp_box_float(mrb_float v) { sp_RbVal r; r.tag = SP_TAG_FLT; r.v.
 static sp_RbVal sp_box_bool(mrb_bool v) { sp_RbVal r; r.tag = SP_TAG_BOOL; r.v.b = v; return r; }
 static sp_RbVal sp_box_nil(void) { sp_RbVal r; r.tag = SP_TAG_NIL; r.v.i = 0; return r; }
 static sp_RbVal sp_box_obj(void *p, int cls_id) { sp_RbVal r; r.tag = SP_TAG_OBJ; r.v.p = p; r.v.cls_id = cls_id; return r; }
+static sp_RbVal sp_box_sym(sp_sym v) { sp_RbVal r; r.tag = SP_TAG_SYM; r.v.i = (mrb_int)v; return r; }
 static void sp_poly_puts(sp_RbVal v) {
   switch (v.tag) {
     case SP_TAG_INT: printf("%lld\n", (long long)v.v.i); break;
@@ -402,11 +408,12 @@ static void sp_poly_puts(sp_RbVal v) {
     case SP_TAG_FLT: { char _fb[64]; snprintf(_fb,64,"%g",v.v.f); if(!strchr(_fb,'.')&&!strchr(_fb,'e')&&!strchr(_fb,'i')&&!strchr(_fb,'n')){strcat(_fb,".0");} printf("%s\n",_fb); break; }
     case SP_TAG_BOOL: puts(v.v.b ? "true" : "false"); break;
     case SP_TAG_NIL: putchar('\n'); break;
+    case SP_TAG_SYM: { const char *_ss = sp_sym_to_s((sp_sym)v.v.i); fputs(_ss, stdout); putchar('\n'); break; }
     default: printf("%lld\n", (long long)v.v.i); break;
   }
 }
 static mrb_bool sp_poly_nil_p(sp_RbVal v) { return v.tag == SP_TAG_NIL; }
-static const char *sp_poly_to_s(sp_RbVal v) { switch (v.tag) { case SP_TAG_INT: { char *b = sp_str_alloc_raw(32); snprintf(b, 32, "%lld", (long long)v.v.i); return b; } case SP_TAG_STR: return v.v.s ? v.v.s : sp_str_empty; case SP_TAG_FLT: { char *b = sp_str_alloc_raw(64); snprintf(b, 64, "%g", v.v.f); return b; } case SP_TAG_BOOL: return v.v.b ? SPL("true") : SPL("false"); case SP_TAG_NIL: return sp_str_empty; default: return sp_str_empty; } }
+static const char *sp_poly_to_s(sp_RbVal v) { switch (v.tag) { case SP_TAG_INT: { char *b = sp_str_alloc_raw(32); snprintf(b, 32, "%lld", (long long)v.v.i); return b; } case SP_TAG_STR: return v.v.s ? v.v.s : sp_str_empty; case SP_TAG_FLT: { char *b = sp_str_alloc_raw(64); snprintf(b, 64, "%g", v.v.f); return b; } case SP_TAG_BOOL: return v.v.b ? SPL("true") : SPL("false"); case SP_TAG_NIL: return sp_str_empty; case SP_TAG_SYM: return sp_sym_to_s((sp_sym)v.v.i); default: return sp_str_empty; } }
 static sp_RbVal sp_poly_add(sp_RbVal a, sp_RbVal b) { if (a.tag == SP_TAG_INT && b.tag == SP_TAG_INT) return sp_box_int(a.v.i + b.v.i); if (a.tag == SP_TAG_FLT && b.tag == SP_TAG_FLT) return sp_box_float(a.v.f + b.v.f); if (a.tag == SP_TAG_INT && b.tag == SP_TAG_FLT) return sp_box_float((mrb_float)a.v.i + b.v.f); if (a.tag == SP_TAG_FLT && b.tag == SP_TAG_INT) return sp_box_float(a.v.f + (mrb_float)b.v.i); if (a.tag == SP_TAG_STR && b.tag == SP_TAG_STR) return sp_box_str(sp_str_concat(a.v.s, b.v.s)); return sp_box_int(0); }
 static sp_RbVal sp_poly_sub(sp_RbVal a, sp_RbVal b) { if (a.tag == SP_TAG_INT && b.tag == SP_TAG_INT) return sp_box_int(a.v.i - b.v.i); if (a.tag == SP_TAG_FLT && b.tag == SP_TAG_FLT) return sp_box_float(a.v.f - b.v.f); return sp_box_int(0); }
 static sp_RbVal sp_poly_mul(sp_RbVal a, sp_RbVal b) { if (a.tag == SP_TAG_INT && b.tag == SP_TAG_INT) return sp_box_int(a.v.i * b.v.i); if (a.tag == SP_TAG_FLT && b.tag == SP_TAG_FLT) return sp_box_float(a.v.f * b.v.f); if (a.tag == SP_TAG_INT && b.tag == SP_TAG_FLT) return sp_box_float((mrb_float)a.v.i * b.v.f); if (a.tag == SP_TAG_FLT && b.tag == SP_TAG_INT) return sp_box_float(a.v.f * (mrb_float)b.v.i); return sp_box_int(0); }

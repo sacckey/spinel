@@ -7657,8 +7657,7 @@ class Compiler
   # Symbol type Phase 2, Step 2: emit the intern table and helpers.
   # SymbolNode now compiles to sp_sym values that index into sp_sym_names.
   def emit_sym_runtime
-    emit_raw("/* sp_sym intern table */")
-    emit_raw("typedef mrb_int sp_sym;")
+    emit_raw("/* sp_sym intern table (sp_sym typedef is in sp_runtime.h) */")
     emit_raw("#define SP_SYM_COUNT " + @sym_names.length.to_s)
     if @sym_names.length == 0
       emit_raw("static const char *const sp_sym_names[1] __attribute__((unused)) = {0};")
@@ -14446,6 +14445,9 @@ class Compiler
     if at == "nil"
       return "sp_box_nil()"
     end
+    if at == "symbol"
+      return "sp_box_sym(" + val + ")"
+    end
     if is_obj_type(at) == 1
       cname = at[4, at.length - 4]
       ci = find_class_idx(cname)
@@ -14472,6 +14474,9 @@ class Compiler
     end
     if at == "nil"
       return "sp_box_nil()"
+    end
+    if at == "symbol"
+      return "sp_box_sym(" + val + ")"
     end
     "sp_box_int(" + val + ")"
   end
@@ -14889,20 +14894,16 @@ class Compiler
         val = compile_expr(elems[k])
         if et == "string"
           emit("  sp_PolyArray_push(" + tmp + ", sp_box_str(" + val + "));")
+        elsif et == "float"
+          emit("  sp_PolyArray_push(" + tmp + ", sp_box_float(" + val + "));")
+        elsif et == "bool"
+          emit("  sp_PolyArray_push(" + tmp + ", sp_box_bool(" + val + "));")
+        elsif et == "nil"
+          emit("  sp_PolyArray_push(" + tmp + ", sp_box_nil());")
+        elsif et == "symbol"
+          emit("  sp_PolyArray_push(" + tmp + ", sp_box_sym(" + val + "));")
         else
-          if et == "float"
-            emit("  sp_PolyArray_push(" + tmp + ", sp_box_float(" + val + "));")
-          else
-            if et == "bool"
-              emit("  sp_PolyArray_push(" + tmp + ", sp_box_bool(" + val + "));")
-            else
-              if et == "nil"
-                emit("  sp_PolyArray_push(" + tmp + ", sp_box_nil());")
-              else
-                emit("  sp_PolyArray_push(" + tmp + ", sp_box_int(" + val + "));")
-              end
-            end
-          end
+          emit("  sp_PolyArray_push(" + tmp + ", sp_box_int(" + val + "));")
         end
         k = k + 1
       end
