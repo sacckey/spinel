@@ -12588,7 +12588,9 @@ class Compiler
   def compile_string_method_expr(nid, mname, rc)
     @needs_string_helpers = 1
     if mname == "length"
-      if @hoisted_strlen_var != ""
+      # Only use hoisted length if the receiver matches (otherwise we'd
+      # return the wrong string's length).
+      if @hoisted_strlen_var != "" && @hoisted_strlen_recv == rc
         return @hoisted_strlen_var
       end
       return "(mrb_int)strlen(" + rc + ")"
