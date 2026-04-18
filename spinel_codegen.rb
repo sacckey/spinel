@@ -733,6 +733,46 @@ class Compiler
     -1
   end
 
+  # If the constant's initializer is a simple literal, return the
+  # corresponding C expression.  Otherwise return "" so callers fall
+  # back to cst_<name> lookup.  Enables propagation of:
+  #   N = 10  →  10 at use sites
+  #   PI = 3.14  →  3.14
+  #   GREETING = "hi"  →  ("\xff" "hi" + 1)
+  #   OK = true  →  TRUE
+  def const_literal_c_value(ci)
+    if ci < 0 || ci >= @const_expr_ids.length
+      return ""
+    end
+    eid = @const_expr_ids[ci]
+    if eid < 0
+      return ""
+    end
+    et = @nd_type[eid]
+    if et == "IntegerNode"
+      return @nd_value[eid].to_s
+    end
+    if et == "FloatNode"
+      return @nd_content[eid]
+    end
+    if et == "StringNode"
+      return c_string_literal(@nd_content[eid])
+    end
+    if et == "TrueNode"
+      return "TRUE"
+    end
+    if et == "FalseNode"
+      return "FALSE"
+    end
+    if et == "NilNode"
+      return "0"
+    end
+    if et == "SymbolNode"
+      return compile_symbol_literal(@nd_content[eid])
+    end
+    ""
+  end
+
   # Find method in class (search parent chain)
   def cls_find_method(ci, mname)
     names = @cls_meth_names[ci].split(";")
@@ -10578,6 +10618,11 @@ class Compiler
       end
       ci = find_const_idx(@nd_name[nid])
       if ci >= 0
+        # Propagate simple literal constants to their use sites.
+        lv = const_literal_c_value(ci)
+        if lv != ""
+          return lv
+        end
         return "cst_" + @nd_name[nid]
       end
       # Check if inside a module method and constant belongs to that module
