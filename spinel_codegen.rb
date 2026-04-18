@@ -13786,27 +13786,6 @@ class Compiler
         return "sp_IntArray_dup(" + rc + ")"
       end
       if mname == "count"
-        if @nd_block[nid] >= 0
-          # count with block
-          blk = @nd_block[nid]
-          bp = get_block_param(nid, 0)
-          tmp = new_temp
-          itmp = new_temp
-          emit("  mrb_int " + tmp + " = 0;")
-          emit("  for (mrb_int " + itmp + " = 0; " + itmp + " < sp_IntArray_length(" + rc + "); " + itmp + "++) {")
-          emit("    mrb_int lv_" + bp + " = sp_IntArray_get(" + rc + ", " + itmp + ");")
-          bbody = @nd_body[blk]
-          bexpr = "0"
-          if bbody >= 0
-            bs = get_stmts(bbody)
-            if bs.length > 0
-              bexpr = compile_expr(bs.last)
-            end
-          end
-          emit("    if (" + bexpr + ") " + tmp + "++;")
-          emit("  }")
-          return tmp
-        end
         return "sp_IntArray_length(" + rc + ")"
       end
       if mname == "min_by"
@@ -13995,27 +13974,6 @@ class Compiler
         end
       end
       if mname == "count"
-        if @nd_block[nid] >= 0
-          blk = @nd_block[nid]
-          bp = get_block_param(nid, 0)
-          declare_var(bp, "string")
-          tmp = new_temp
-          itmp = new_temp
-          emit("  mrb_int " + tmp + " = 0;")
-          emit("  for (mrb_int " + itmp + " = 0; " + itmp + " < sp_StrArray_length(" + rc + "); " + itmp + "++) {")
-          emit("    const char *lv_" + bp + " = sp_StrArray_get(" + rc + ", " + itmp + ");")
-          bbody = @nd_body[blk]
-          bexpr = "0"
-          if bbody >= 0
-            bs = get_stmts(bbody)
-            if bs.length > 0
-              bexpr = compile_expr(bs.last)
-            end
-          end
-          emit("    if (" + bexpr + ") " + tmp + "++;")
-          emit("  }")
-          return tmp
-        end
         return "sp_StrArray_length(" + rc + ")"
       end
     end
