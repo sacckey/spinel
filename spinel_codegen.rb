@@ -119,6 +119,11 @@ class Compiler
     @cls_cmeth_returns = "".split(",")
     @cls_cmeth_bodies = "".split(",")
     @cls_is_value_type = []
+    # SRA (scalar replacement of aggregates) eligibility flag per class.
+    # Classes marked here can have their non-escaping instances replaced
+    # with individual scalar locals. Distinct from value_type: SRA allows
+    # attr_writer (mutation is rewritten to per-field assignment).
+    @cls_is_sra = []
 
     # ---- Constants (parallel arrays) ----
     @const_names = "".split(",")
@@ -3290,6 +3295,7 @@ class Compiler
     ci = @cls_names.length
     @cls_names.push(cname)
     @cls_is_value_type.push(0)
+    @cls_is_sra.push(0)
     @cls_parents.push(parent)
     # Initialize struct fields as ivars
     ivar_names = ""
@@ -4185,6 +4191,7 @@ class Compiler
     ci = @cls_names.length
     @cls_names.push(cname)
     @cls_is_value_type.push(0)
+    @cls_is_sra.push(0)
     @cls_parents.push("")
     @cls_ivar_names.push("")
     @cls_ivar_types.push("")
@@ -8692,6 +8699,62 @@ class Compiler
         end
         i = i + 1
       end
+    end
+    # SRA eligibility (Phase 2a): like value-type but allows attr_writer.
+    # The per-instance escape check happens separately at use sites.
+    i = 0
+    while i < @cls_names.length
+      if @cls_is_value_type[i] == 1
+        # Already handled as value-type; SRA redundant for these.
+        i = i + 1
+        next
+      end
+      names = @cls_ivar_names[i].split(";")
+      types = @cls_ivar_types[i].split(";")
+      eligible = 1
+      if names.length == 0 || names.length > 8
+        eligible = 0
+      end
+      j = 0
+      while eligible == 1 && j < types.length
+        t = types[j]
+        if t != "int" && t != "float" && t != "bool"
+          eligible = 0
+        end
+        j = j + 1
+      end
+      # No inheritance
+      if eligible == 1 && @cls_parents[i] != ""
+        eligible = 0
+      end
+      if eligible == 1
+        si = 0
+        while si < @cls_names.length
+          if @cls_parents[si] == @cls_names[i]
+            eligible = 0
+          end
+          si = si + 1
+        end
+      end
+      # Only initialize + attr_* methods (no custom methods).
+      if eligible == 1
+        mnames = @cls_meth_names[i].split(";")
+        readers = @cls_attr_readers[i].split(";")
+        writers = @cls_attr_writers[i].split(";")
+        mk = 0
+        while mk < mnames.length
+          mn = mnames[mk]
+          # allowed: initialize, any attr_reader/writer name
+          if mn != "initialize" && not_in(mn, readers) == 1 && not_in(mn, writers) == 1
+            eligible = 0
+          end
+          mk = mk + 1
+        end
+      end
+      if eligible == 1
+        @cls_is_sra[i] = 1
+      end
+      i = i + 1
     end
   end
 
