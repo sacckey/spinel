@@ -12006,13 +12006,16 @@ class Compiler
             lt = infer_type(@nd_left[a0])
             rt = infer_type(@nd_right[a0])
             if lt == "string" or lt == "argv"
-              # ARGV access || default
+              # Bind the left-hand expression to a temp so it's evaluated
+              # only once, and so GCC's nonnull analysis can see that the
+              # strtoll call sits in the truthy branch of the same test.
               lc = compile_expr(@nd_left[a0])
               rc2 = compile_expr(@nd_right[a0])
+              tmp = new_temp
               if rt == "int"
-                return "((" + lc + ") ? (mrb_int)strtoll(" + lc + ", NULL, 10) : " + rc2 + ")"
+                return "({ const char *" + tmp + " = " + lc + "; " + tmp + " ? (mrb_int)strtoll(" + tmp + ", NULL, 10) : " + rc2 + "; })"
               else
-                return "((" + lc + ") ? (mrb_int)strtoll(" + lc + ", NULL, 10) : (mrb_int)strtoll(" + rc2 + ", NULL, 10))"
+                return "({ const char *" + tmp + " = " + lc + "; " + tmp + " ? (mrb_int)strtoll(" + tmp + ", NULL, 10) : (mrb_int)strtoll(" + rc2 + ", NULL, 10); })"
               end
             end
           end
