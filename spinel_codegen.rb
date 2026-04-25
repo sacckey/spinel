@@ -200,6 +200,11 @@ class Compiler
     @lambda_var_ret_types = "".split(",")
     @last_lambda_ret_type = ""
 
+    # Proc closure support (Phase 2)
+    @in_proc_body = 0
+    @proc_captures = "".split(",")
+    @proc_capture_types = "".split(",")
+
     # Fiber support
     @needs_fiber = 0
     @needs_bigint = 0
@@ -235,6 +240,11 @@ class Compiler
     @lambda_params = "".split(",")
     @lambda_captures = "".split(",")
     @lambda_insert_pos = 0
+
+    # Proc closure support (Phase 2)
+    @in_proc_body = 0
+    @proc_captures = "".split(",")
+    @proc_capture_types = "".split(",")
 
     # Symbol type Phase 2 Step 1: intern table (infrastructure only; unused yet).
     @sym_names = "".split(",")
@@ -2861,6 +2871,9 @@ class Compiler
     if t == "fiber" || t == "bigint"
       return 1
     end
+    if t == "proc"
+      return 1
+    end
     if is_obj_type(t) == 1
       cname = t[4, t.length - 4]
       ci = find_class_idx(cname)
@@ -3036,7 +3049,7 @@ class Compiler
       return "sp_RbVal"
     end
     if t == "proc"
-      return "sp_Proc"
+      return "sp_Proc *"
     end
     if t == "stringio"
       return "sp_StringIO *"
@@ -3100,7 +3113,7 @@ class Compiler
       return "NULL"
     end
     if t == "proc"
-      return "sp_proc_new(NULL)"
+      return "NULL"
     end
     if type_is_pointer(t) == 1
       return "NULL"
@@ -8249,10 +8262,11 @@ class Compiler
   end
 
   def emit_proc_runtime
-    emit_raw("typedef mrb_int (*sp_proc_fn_t)(mrb_int);")
-    emit_raw("typedef struct { sp_proc_fn_t fn; } sp_Proc;")
-    emit_raw("static sp_Proc sp_proc_new(sp_proc_fn_t fn) { sp_Proc p; p.fn = fn; return p; }")
-    emit_raw("static mrb_int sp_proc_call(sp_Proc p, mrb_int arg) { return p.fn ? p.fn(arg) : 0; }")
+    emit_raw("typedef mrb_int (*sp_proc_fn_t)(void *, mrb_int);")
+    emit_raw("typedef struct sp_Proc { sp_proc_fn_t fn; void *cap; void (*cap_scan)(void *); } sp_Proc;")
+    emit_raw("static void sp_Proc_scan(void *p) { sp_Proc *pr = (sp_Proc *)p; if (pr->cap && pr->cap_scan) pr->cap_scan(pr->cap); }")
+    emit_raw("static sp_Proc *sp_proc_new(sp_proc_fn_t fn, void *cap, void (*cap_scan)(void *)) { sp_Proc *p = (sp_Proc *)sp_gc_alloc(sizeof(sp_Proc), NULL, sp_Proc_scan); p->fn = fn; p->cap = cap; p->cap_scan = cap_scan; return p; }")
+    emit_raw("static mrb_int sp_proc_call(sp_Proc *p, mrb_int arg) { return (p && p->fn) ? p->fn(p->cap, arg) : 0; }")
     emit_raw("")
   end
 
@@ -11574,6 +11588,17 @@ class Compiler
     -1
   end
 
+  def proc_capture_index(name)
+    i = 0
+    while i < @proc_captures.length
+      if @proc_captures[i] == name
+        return i
+      end
+      i = i + 1
+    end
+    -1
+  end
+
   def heap_promoted_cell(name)
     i = 0
     while i < @heap_promoted_names.length
@@ -11591,8 +11616,16 @@ class Compiler
         return "(*_cap->" + name + ")"
       end
     end
+    if @in_proc_body == 1
+      if proc_capture_index(name) >= 0
+        return "(*_cap->" + name + ")"
+      end
+      # Inside a proc body, captures only come via _cap->. Heap-promoted
+      # cells from outer functions are not visible here.
+      return "lv_" + name
+    end
     cell = heap_promoted_cell(name)
-    if cell != ""
+    if cell != "" && find_var_type(name) != ""
       return "(*" + cell + ")"
     end
     "lv_" + name
@@ -18655,7 +18688,7 @@ class Compiler
   def compile_proc_literal(nid)
     blk = @nd_block[nid]
     if blk < 0
-      return "sp_proc_new(NULL)"
+      return "sp_proc_new(NULL, NULL, NULL)"
     end
     bp = get_block_param(nid, 0)
     if bp == ""
@@ -18663,11 +18696,52 @@ class Compiler
     end
     # Generate a static function for the proc body
     @proc_counter = @proc_counter + 1
-    fname = "_sp_proc_fn_" + @proc_counter.to_s
+    pid = @proc_counter
+    fname = "_sp_proc_fn_" + pid.to_s
+    cap_name = "_proc_cap_" + pid.to_s
+    cap_scan_name = "_proc_cap_scan_" + pid.to_s
     bbody = @nd_body[blk]
-    # Save current output, compile body into a separate buffer
+
+    # Detect captures (free variables that resolve in outer scope).
+    free_vars = "".split(",")
+    if bbody >= 0
+      proc_params = "".split(",")
+      proc_params.push(bp)
+      proc_locals = "".split(",")
+      scan_lambda_free_vars(bbody, proc_params, proc_locals, free_vars)
+    end
+    captures = "".split(",")
+    capture_types = "".split(",")
+    fk = 0
+    while fk < free_vars.length
+      fv = free_vars[fk]
+      vt = find_var_type(fv)
+      if vt != ""
+        captures.push(fv)
+        capture_types.push(vt)
+      end
+      fk = fk + 1
+    end
+    has_captures = 0
+    if captures.length > 0
+      has_captures = 1
+    end
+
+    # Compile the body. While captures > 0, set @in_proc_body so that
+    # compile_expr's fiber_var_ref rewrites captured-var reads/writes to
+    # (*_cap->VN). Heap promotion of those vars in the enclosing scope is
+    # done after body compile (so cells exist before they're referenced
+    # in the cap struct allocation).
     save_out = @out_lines
     @out_lines = "".split(",")
+    saved_in_proc_body = @in_proc_body
+    saved_proc_captures = @proc_captures
+    saved_proc_capture_types = @proc_capture_types
+    if has_captures == 1
+      @in_proc_body = 1
+      @proc_captures = captures
+      @proc_capture_types = capture_types
+    end
     push_scope
     declare_var(bp, "int")
     bexpr = "0"
@@ -18675,13 +18749,17 @@ class Compiler
     if bbody >= 0
       bs = get_stmts(bbody)
       if bs.length > 0
-        # Compile all statements (including side effects of last)
         k = 0
         while k < bs.length
           lt = infer_type(bs[k])
           if k == bs.length - 1
-            if lt != "void"
-              # Last statement: compile all previous, then get return expr
+            last_t = @nd_type[bs[k]]
+            if last_t == "LocalVariableWriteNode" || last_t == "LocalVariableOperatorWriteNode"
+              compile_stmt(bs[k])
+              body_stmts = @out_lines.join(10.chr) + 10.chr
+              @out_lines = "".split(",")
+              bexpr = fiber_var_ref(@nd_name[bs[k]])
+            elsif lt != "void"
               body_stmts = @out_lines.join(10.chr) + 10.chr
               @out_lines = "".split(",")
               bexpr = compile_expr(bs[k])
@@ -18689,7 +18767,6 @@ class Compiler
               @out_lines = "".split(",")
               body_stmts = body_stmts + extra
             else
-              # Last is void (like puts): compile as statement, return 0
               compile_stmt(bs[k])
             end
           else
@@ -18704,62 +18781,120 @@ class Compiler
       end
     end
     pop_scope
+    @in_proc_body = saved_in_proc_body
+    @proc_captures = saved_proc_captures
+    @proc_capture_types = saved_proc_capture_types
     @out_lines = save_out
-    # Detect free variables that reference outer-scope locals (captures).
-    # Until proc closure support lands (Phase 2), surface this loudly:
-    # silent file-scope hoist would either drop the body or fail to compile.
-    free_vars = "".split(",")
-    if bbody >= 0
-      proc_params = "".split(",")
-      proc_params.push(bp)
-      proc_locals = "".split(",")
-      scan_lambda_free_vars(bbody, proc_params, proc_locals, free_vars)
-    end
-    captures = "".split(",")
-    fk = 0
-    while fk < free_vars.length
-      fv = free_vars[fk]
-      if find_var_type(fv) != ""
-        captures.push(fv)
+
+    if has_captures == 1
+      # Emit per-proc capture struct + scan function + body fn that casts
+      # the void* cap to the typed struct.
+      @lambda_funcs << "typedef struct { "
+      k = 0
+      while k < captures.length
+        @lambda_funcs << c_type(capture_types[k])
+        @lambda_funcs << " *"
+        @lambda_funcs << captures[k]
+        @lambda_funcs << "; "
+        k = k + 1
       end
-      fk = fk + 1
-    end
-    if captures.length > 0
-      cap_list = captures.join(", ")
-      STDERR.puts("spinel: proc body captures outer local(s) [" + cap_list + "] which is not yet implemented; use lambda { ... } / -> { ... } for closures (proc: " + fname + ")")
-      @lambda_funcs << "/* proc captures outer locals (not yet supported): "
-      @lambda_funcs << cap_list
-      @lambda_funcs << " */\n"
+      @lambda_funcs << "} "
+      @lambda_funcs << cap_name
+      @lambda_funcs << ";\n"
+      @lambda_funcs << "static void "
+      @lambda_funcs << cap_scan_name
+      @lambda_funcs << "(void *p) {\n"
+      @lambda_funcs << "  "
+      @lambda_funcs << cap_name
+      @lambda_funcs << " *_c = ("
+      @lambda_funcs << cap_name
+      @lambda_funcs << " *)p;\n"
+      k = 0
+      while k < captures.length
+        @lambda_funcs << "  if (_c->"
+        @lambda_funcs << captures[k]
+        @lambda_funcs << ") sp_gc_mark((void *)_c->"
+        @lambda_funcs << captures[k]
+        @lambda_funcs << ");\n"
+        k = k + 1
+      end
+      @lambda_funcs << "}\n"
       @lambda_funcs << "static mrb_int "
       @lambda_funcs << fname
-      @lambda_funcs << "(mrb_int lv_"
+      @lambda_funcs << "(void *_cap_raw, mrb_int lv_"
       @lambda_funcs << bp
       @lambda_funcs << ") {\n"
-      @lambda_funcs << "  fprintf(stderr, \"spinel: proc with captured variables ["
-      @lambda_funcs << cap_list
-      @lambda_funcs << "] is not implemented; use lambda for closures"
-      @lambda_funcs << bsl_n
-      @lambda_funcs << "\");\n"
-      @lambda_funcs << "  abort();\n"
-      @lambda_funcs << "  return 0;\n"
-      @lambda_funcs << "}\n"
-      return "sp_proc_new(" + fname + ")"
+      @lambda_funcs << "  "
+      @lambda_funcs << cap_name
+      @lambda_funcs << " *_cap = ("
+      @lambda_funcs << cap_name
+      @lambda_funcs << " *)_cap_raw;\n"
+      if body_stmts != ""
+        @lambda_funcs << body_stmts
+      end
+      @lambda_funcs << "  return "
+      @lambda_funcs << bexpr
+      @lambda_funcs << ";\n}\n"
+
+      # In the enclosing scope: heap-promote each captured local (allocate
+      # a cell, copy current value into it, register so subsequent
+      # references in the enclosing scope go through the cell), then
+      # allocate the cap struct and populate its pointers.
+      k = 0
+      while k < captures.length
+        vn = captures[k]
+        ct = c_type(capture_types[k])
+        already_promoted = 0
+        ci = 0
+        while ci < @heap_promoted_names.length
+          if @heap_promoted_names[ci] == vn
+            already_promoted = 1
+          end
+          ci = ci + 1
+        end
+        if already_promoted == 0
+          cell = "_hcell_" + vn + "_p" + pid.to_s
+          emit("  " + ct + " *" + cell + " = (" + ct + " *)sp_gc_alloc(sizeof(" + ct + "), NULL, NULL);")
+          emit("  *" + cell + " = " + fiber_var_ref(vn) + ";")
+          @heap_promoted_names.push(vn)
+          @heap_promoted_cells.push(cell)
+        end
+        k = k + 1
+      end
+      cap_ptr = "_cap_ptr_p" + pid.to_s
+      emit("  " + cap_name + " *" + cap_ptr + " = (" + cap_name + " *)sp_gc_alloc(sizeof(" + cap_name + "), NULL, " + cap_scan_name + ");")
+      k = 0
+      while k < captures.length
+        vn = captures[k]
+        ci = 0
+        cell = ""
+        while ci < @heap_promoted_names.length
+          if @heap_promoted_names[ci] == vn
+            cell = @heap_promoted_cells[ci]
+          end
+          ci = ci + 1
+        end
+        emit("  " + cap_ptr + "->" + vn + " = " + cell + ";")
+        k = k + 1
+      end
+      return "sp_proc_new(" + fname + ", " + cap_ptr + ", " + cap_scan_name + ")"
     end
-    # Hoist the proc body to file scope. Previously this was emitted as a
-    # GCC nested-function inside a statement-expression, which Apple clang
-    # does not implement. File-scope works for non-capturing procs.
+
+    # No captures: file-scope function with unused cap arg, sp_proc_new
+    # with NULL cap and NULL scan.
     @lambda_funcs << "static mrb_int "
     @lambda_funcs << fname
-    @lambda_funcs << "(mrb_int lv_"
+    @lambda_funcs << "(void *_cap, mrb_int lv_"
     @lambda_funcs << bp
     @lambda_funcs << ") {\n"
+    @lambda_funcs << "  (void)_cap;\n"
     if body_stmts != ""
       @lambda_funcs << body_stmts
     end
     @lambda_funcs << "  return "
     @lambda_funcs << bexpr
     @lambda_funcs << ";\n}\n"
-    return "sp_proc_new(" + fname + ")"
+    return "sp_proc_new(" + fname + ", NULL, NULL)"
   end
 
   def compile_bracket_assign(nid)
