@@ -743,7 +743,109 @@ class Compiler
     end
     rt = @nd_type[recv_nid]
     if rt == "ConstantReadNode" || rt == "ConstantPathNode"
-      return const_ref_flat_name(recv_nid)
+      return resolve_const_ref_name(recv_nid)
+    end
+    ""
+  end
+
+  def module_name_exists(name)
+    i = 0
+    while i < @module_names.length
+      if @module_names[i] == name
+        return 1
+      end
+      i = i + 1
+    end
+    0
+  end
+
+  def builtin_const_root_name(name)
+    if name == "Float" || name == "Integer" || name == "Math"
+      return 1
+    end
+    if name == "Array" || name == "Hash" || name == "Proc" || name == "StringIO" || name == "Fiber"
+      return 1
+    end
+    0
+  end
+
+  def const_namespace_exists(name)
+    if name == ""
+      return 0
+    end
+    if find_const_idx(name) >= 0
+      return 1
+    end
+    if find_class_idx(name) >= 0
+      return 1
+    end
+    if module_name_exists(name) == 1
+      return 1
+    end
+    if builtin_const_root_name(name) == 1
+      return 1
+    end
+    0
+  end
+
+  def current_lexical_scope_name
+    if @current_class_idx >= 0
+      if @current_class_idx < @cls_names.length
+        return @cls_names[@current_class_idx]
+      end
+      return ""
+    end
+    if @current_method_name != ""
+      cls_idx = @current_method_name.index("_cls_")
+      if cls_idx >= 0
+        return @current_method_name[0, cls_idx]
+      end
+    end
+    ""
+  end
+
+  def trim_const_scope_once(name)
+    if name == ""
+      return ""
+    end
+    idx = name.rindex("_")
+    if idx < 0
+      return ""
+    end
+    name[0, idx]
+  end
+
+  def resolve_const_read_name(name)
+    scope = current_lexical_scope_name
+    while scope != ""
+      cand = scope + "_" + name
+      if const_namespace_exists(cand) == 1
+        return cand
+      end
+      scope = trim_const_scope_once(scope)
+    end
+    name
+  end
+
+  def resolve_const_ref_name(nid)
+    if nid < 0
+      return ""
+    end
+    t = @nd_type[nid]
+    if t == "ConstantReadNode"
+      return resolve_const_read_name(@nd_name[nid])
+    end
+    if t == "ConstantPathNode"
+      leaf = @nd_name[nid]
+      parent = @nd_receiver[nid]
+      if parent < 0
+        return leaf
+      end
+      base = resolve_const_ref_name(parent)
+      if base == ""
+        return ""
+      end
+      return base + "_" + leaf
     end
     ""
   end
@@ -1045,41 +1147,28 @@ class Compiler
       if @nd_name[nid] == "ARGV"
         return "argv"
       end
-      ci = find_const_idx(@nd_name[nid])
+      rname = resolve_const_read_name(@nd_name[nid])
+      ci = find_const_idx(rname)
       if ci >= 0
         return @const_types[ci]
       end
-      cx = find_class_idx(@nd_name[nid])
+      cx = find_class_idx(rname)
       if cx >= 0
-        return "class_" + @nd_name[nid]
-      end
-      # Check module-prefixed constants
-      mi3 = 0
-      while mi3 < @module_names.length
-        mmod = @module_names[mi3]
-        if mmod != ""
-          cpname = mmod + "_" + @nd_name[nid]
-          ci4 = find_const_idx(cpname)
-          if ci4 >= 0
-            return @const_types[ci4]
-          end
-        end
-        mi3 = mi3 + 1
+        return "class_" + rname
       end
       return "int"
     end
     if t == "ConstantPathNode"
-      if @nd_receiver[nid] >= 0
-        rname = const_ref_flat_name(@nd_receiver[nid])
-        nname = @nd_name[nid]
-        if rname == ""
-          return "int"
-        end
-        cpname = rname + "_" + nname
+      cpname = resolve_const_ref_name(nid)
+      if cpname != ""
         ci = find_const_idx(cpname)
         if ci >= 0
           return @const_types[ci]
         end
+      end
+      parent = @nd_receiver[nid]
+      if parent >= 0
+        rname = resolve_const_ref_name(parent)
         if rname == "Float"
           return "float"
         end
@@ -3472,8 +3561,26 @@ class Compiler
   end
 
   def collect_scoped_constant(scope_name, nid)
-    cname = scope_name + "_" + @nd_name[nid]
+    cname = @nd_name[nid]
+    if scope_name != ""
+      cname = scope_name + "_" + cname
+    end
     expr_id = @nd_expression[nid]
+    if expr_id >= 0
+      if @nd_type[expr_id] == "CallNode"
+        if @nd_name[expr_id] == "new"
+          sr = @nd_receiver[expr_id]
+          if sr >= 0
+            if @nd_type[sr] == "ConstantReadNode"
+              if @nd_name[sr] == "Struct"
+                collect_struct_class(cname, expr_id)
+                return
+              end
+            end
+          end
+        end
+      end
+    end
     ct = "int"
     if expr_id >= 0
       ct = infer_type(expr_id)
@@ -4467,15 +4574,7 @@ class Compiler
 
     body_stmts.each { |sid|
       if @nd_type[sid] == "ConstantWriteNode"
-        cname = mname + "_" + @nd_name[sid]
-        expr_id = @nd_expression[sid]
-        ct = "int"
-        if expr_id >= 0
-          ct = infer_type(expr_id)
-        end
-        @const_names.push(cname)
-        @const_types.push(ct)
-        @const_expr_ids.push(expr_id)
+        collect_scoped_constant(mname, sid)
       end
       # Collect module class methods (def self.xxx) as top-level functions
       if @nd_type[sid] == "DefNode"
@@ -4510,30 +4609,7 @@ class Compiler
   end
 
   def collect_constant(nid)
-    # Check for Struct.new(:x, :y)
-    expr_id = @nd_expression[nid]
-    if expr_id >= 0
-      if @nd_type[expr_id] == "CallNode"
-        if @nd_name[expr_id] == "new"
-          sr = @nd_receiver[expr_id]
-          if sr >= 0
-            if @nd_type[sr] == "ConstantReadNode"
-              if @nd_name[sr] == "Struct"
-                collect_struct_class(@nd_name[nid], expr_id)
-                return
-              end
-            end
-          end
-        end
-      end
-    end
-    @const_names.push(@nd_name[nid])
-    ct = "int"
-    if expr_id >= 0
-      ct = infer_type(expr_id)
-    end
-    @const_types.push(ct)
-    @const_expr_ids.push(expr_id)
+    collect_scoped_constant("", nid)
   end
 
   def collect_struct_class(cname, call_nid)
@@ -11398,50 +11474,29 @@ class Compiler
       if @nd_name[nid] == "ARGV"
         return "sp_argv"
       end
-      ci = find_const_idx(@nd_name[nid])
+      rname = resolve_const_read_name(@nd_name[nid])
+      ci = find_const_idx(rname)
       if ci >= 0
         # Propagate simple literal constants to their use sites.
         lv = const_literal_c_value(ci)
         if lv != ""
           return lv
         end
-        return "cst_" + @nd_name[nid]
+        return "cst_" + rname
       end
-      # Check if inside a module method and constant belongs to that module
-      mi3 = 0
-      while mi3 < @module_names.length
-        mmod = @module_names[mi3]
-        if mmod != ""
-          if @current_method_name.start_with?(mmod + "_cls_")
-            cpname = mmod + "_" + @nd_name[nid]
-            ci4 = find_const_idx(cpname)
-            if ci4 >= 0
-              return "cst_" + cpname
-            end
-          end
-          # Also check when in main scope (module constants referenced at top level)
-          cpname = mmod + "_" + @nd_name[nid]
-          ci5 = find_const_idx(cpname)
-          if ci5 >= 0
-            return "cst_" + cpname
-          end
-        end
-        mi3 = mi3 + 1
-      end
-      return @nd_name[nid]
+      return rname
     end
     if t == "ConstantPathNode"
-      if @nd_receiver[nid] >= 0
-        rname = const_ref_flat_name(@nd_receiver[nid])
-        nname = @nd_name[nid]
-        if rname == ""
-          return @nd_name[nid]
-        end
-        cpname = rname + "_" + nname
+      cpname = resolve_const_ref_name(nid)
+      if cpname != ""
         ci = find_const_idx(cpname)
         if ci >= 0
           return "cst_" + cpname
         end
+      end
+      if @nd_receiver[nid] >= 0
+        rname = resolve_const_ref_name(@nd_receiver[nid])
+        nname = @nd_name[nid]
         # Built-in constants
         if rname == "Float"
           if nname == "INFINITY"
@@ -11464,7 +11519,9 @@ class Compiler
             return "2.71828182845904523536"
           end
         end
-        return cpname
+        if cpname != ""
+          return cpname
+        end
       end
       return @nd_name[nid]
     end
