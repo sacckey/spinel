@@ -129,6 +129,7 @@ class Compiler
     @const_names = "".split(",")
     @const_types = "".split(",")
     @const_expr_ids = []
+    @const_scope_names = "".split(",")
 
     # ---- Scope stack for local variables ----
     @scope_names = "".split(",")
@@ -136,6 +137,7 @@ class Compiler
 
     @current_class_idx = -1
     @current_method_name = ""
+    @current_lexical_scope = ""
     @current_method_return = ""
     @in_main = 0
     @in_loop = 0
@@ -759,16 +761,6 @@ class Compiler
     0
   end
 
-  def builtin_const_root_name(name)
-    if name == "Float" || name == "Integer" || name == "Math"
-      return 1
-    end
-    if name == "Array" || name == "Hash" || name == "Proc" || name == "StringIO" || name == "Fiber"
-      return 1
-    end
-    0
-  end
-
   def const_namespace_exists(name)
     if name == ""
       return 0
@@ -782,13 +774,13 @@ class Compiler
     if module_name_exists(name) == 1
       return 1
     end
-    if builtin_const_root_name(name) == 1
-      return 1
-    end
     0
   end
 
   def current_lexical_scope_name
+    if @current_lexical_scope != ""
+      return @current_lexical_scope
+    end
     if @current_class_idx >= 0
       if @current_class_idx < @cls_names.length
         return @cls_names[@current_class_idx]
@@ -1164,6 +1156,10 @@ class Compiler
         ci = find_const_idx(cpname)
         if ci >= 0
           return @const_types[ci]
+        end
+        cx = find_class_idx(cpname)
+        if cx >= 0
+          return "class_" + cpname
         end
       end
       parent = @nd_receiver[nid]
@@ -3583,17 +3579,22 @@ class Compiler
     end
     ct = "int"
     if expr_id >= 0
+      old_scope = @current_lexical_scope
+      @current_lexical_scope = scope_name
       ct = infer_type(expr_id)
+      @current_lexical_scope = old_scope
     end
     ci = find_const_idx(cname)
     if ci >= 0
       @const_types[ci] = ct
       @const_expr_ids[ci] = expr_id
+      @const_scope_names[ci] = scope_name
       return
     end
     @const_names.push(cname)
     @const_types.push(ct)
     @const_expr_ids.push(expr_id)
+    @const_scope_names.push(scope_name)
   end
 
   def collect_class_with_prefix(nid, module_prefix)
@@ -4604,6 +4605,7 @@ class Compiler
         @const_names.push(cname2)
         @const_types.push(ct)
         @const_expr_ids.push(expr_id)
+        @const_scope_names.push(mname)
       end
     }
   end
@@ -11331,7 +11333,14 @@ class Compiler
     # Constants (initialize global declarations)
     i = 0
     while i < @const_names.length
+      old_scope = @current_lexical_scope
+      if i < @const_scope_names.length
+        @current_lexical_scope = @const_scope_names[i]
+      else
+        @current_lexical_scope = ""
+      end
       val = compile_expr(@const_expr_ids[i])
+      @current_lexical_scope = old_scope
       emit("  cst_" + @const_names[i] + " = " + val + ";")
       if type_is_pointer(@const_types[i]) == 1
         emit("  SP_GC_ROOT(cst_" + @const_names[i] + ");")
