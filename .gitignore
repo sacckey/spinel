@@ -25,5 +25,5 @@ lib/libspbi.a
 HANDOFF.md
 
 # Local Claude config
-.claude/settings.local.json
+.claude/
 CLAUDE.local.md
