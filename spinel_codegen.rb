@@ -1771,17 +1771,23 @@ class Compiler
       return "int"
     end
     if mname == "%"
-      # String#% returns "string" only when the RHS is a str_array
-      # (sprintf-style format). Other RHS types fall through to sp_imod
-      # in compile_operator_expr, which yields int.
+      # String#% returns "string" when the LHS is a string (and the RHS
+      # is a str_array or a single primitive value). Otherwise the
+      # operator is integer modulo.
       if recv >= 0
         rt = infer_type(recv)
         if rt == "string" || rt == "mutable_str"
           args_id = @nd_arguments[nid]
           if args_id >= 0
             aargs = get_args(args_id)
-            if aargs.length > 0 && infer_type(aargs[0]) == "str_array"
-              return "string"
+            if aargs.length > 0
+              at = infer_type(aargs[0])
+              if at == "str_array"
+                return "string"
+              end
+              if rt == "string"
+                return "string"
+              end
             end
           end
         end
@@ -13899,6 +13905,62 @@ class Compiler
               return "sp_str_format_strarr(" + recv_c + ", " + compile_expr(aargs[0]) + ")"
             end
           end
+        end
+      end
+      if lt == "string"
+        # Ruby's `"fmt" % val` — single-value form. Arg is cast to match
+        # the conversion: (double) for %f, (long long) for integer
+        # conversions. Ruby's `%d` is mapped to C's `%lld` when the
+        # format is a string literal — otherwise pass through.
+        arg0 = get_args(@nd_arguments[nid])[0]
+        at = infer_type(arg0)
+        fmt_c = compile_expr(recv)
+        # Literal-format optimization: rewrite %d → %lld at compile time
+        # (done byte-by-byte to avoid pulling in the regex engine — the
+        # self-hosted bootstrap step links without libspinel_rt.a).
+        if @nd_type[recv] == "StringNode"
+          lit = @nd_unescaped[recv]
+          if lit == ""
+            lit = @nd_content[recv]
+          end
+          rewritten = ""
+          fi = 0
+          while fi < lit.length
+            if lit[fi] == "%"
+              # Copy "%" + any flags/width + final spec.
+              rewritten = rewritten + "%"
+              fi = fi + 1
+              while fi < lit.length
+                c = lit[fi]
+                if c == "-" || c == "+" || c == " " || c == "#" || c == "0" || (c >= "1" && c <= "9") || c == "."
+                  rewritten = rewritten + c
+                  fi = fi + 1
+                else
+                  break
+                end
+              end
+              if fi < lit.length
+                c = lit[fi]
+                if c == "d" || c == "i"
+                  rewritten = rewritten + "lld"
+                else
+                  rewritten = rewritten + c
+                end
+                fi = fi + 1
+              end
+            else
+              rewritten = rewritten + lit[fi]
+              fi = fi + 1
+            end
+          end
+          fmt_c = c_string_literal(rewritten)
+        end
+        if at == "float"
+          return "sp_sprintf(" + fmt_c + ", (double)" + compile_expr(arg0) + ")"
+        elsif at == "string"
+          return "sp_sprintf(" + fmt_c + ", " + compile_expr(arg0) + ")"
+        else
+          return "sp_sprintf(" + fmt_c + ", (long long)" + compile_expr(arg0) + ")"
         end
       end
       return "sp_imod(" + compile_expr(recv) + ", " + compile_arg0(nid) + ")"
