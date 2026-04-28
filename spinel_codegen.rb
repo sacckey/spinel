@@ -3530,6 +3530,9 @@ class Compiler
     if t == "float_array"
       return "FloatArray"
     end
+    if t == "poly_array"
+      return "PolyArray"
+    end
     "IntArray"
   end
 
