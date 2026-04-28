@@ -11131,6 +11131,19 @@ class Compiler
                   end
                   ki = ki + 1
                 end
+              elsif arg_type == "symbol"
+                # sym_array uses sp_IntArray storage, so int_array
+                # helpers stay required even after promotion.
+                @needs_int_array = 1
+                ki = 0
+                while ki < names.length
+                  if names[ki] == arr_name
+                    if types[ki] == "int_array"
+                      types[ki] = "sym_array"
+                    end
+                  end
+                  ki = ki + 1
+                end
               end
             end
           end
@@ -17584,8 +17597,11 @@ class Compiler
       end
       vref = fiber_var_ref(lname)
       vt = find_var_type(lname)
-      # Empty array literal: create the correct array type
-      if vt == "str_array" || vt == "float_array" || is_ptr_array_type(vt) == 1
+      # Empty array literal: create the correct array type. Returning
+      # early here also preserves the scope's already-promoted type
+      # (issue #58, #85) — the fall-through path below would clobber
+      # vt with infer_type([])'s "int_array" via set_var_type.
+      if vt == "str_array" || vt == "float_array" || vt == "sym_array" || is_ptr_array_type(vt) == 1
         expr_id = @nd_expression[nid]
         if expr_id >= 0 && @nd_type[expr_id] == "ArrayNode"
           elems = parse_id_list(@nd_elements[expr_id])
@@ -17598,6 +17614,11 @@ class Compiler
               @needs_float_array = 1
               @needs_gc = 1
               emit("  " + vref + " = sp_FloatArray_new();")
+            elsif vt == "sym_array"
+              # sym_array shares sp_IntArray storage.
+              @needs_int_array = 1
+              @needs_gc = 1
+              emit("  " + vref + " = sp_IntArray_new();")
             else
               @needs_ptr_array = 1
               @needs_gc = 1
