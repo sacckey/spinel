@@ -1726,6 +1726,10 @@ class Compiler
         if lt == "poly"
           return "poly"
         end
+        if is_array_type(lt) == 1
+          # Array#* (repeat) yields another array of the same element type.
+          return lt
+        end
         # Check RHS for float promotion
         args_id = @nd_arguments[nid]
         if args_id >= 0
@@ -3557,6 +3561,19 @@ class Compiler
       return 1
     end
     0
+  end
+
+  # Set the right @needs_<runtime> flag for the given array type.
+  def mark_array_runtime_needs(t)
+    if t == "float_array"
+      @needs_float_array = 1
+    elsif t == "str_array"
+      @needs_str_array = 1
+    elsif t == "poly_array"
+      @needs_rb_value = 1
+    else
+      @needs_int_array = 1
+    end
   end
 
   # ---- Collection pass ----
@@ -13907,6 +13924,22 @@ class Compiler
       if lt == "poly"
         @needs_rb_value = 1
         return "sp_poly_mul(" + compile_expr(recv) + ", " + box_expr_to_poly(get_args(@nd_arguments[nid])[0]) + ")"
+      end
+      if is_array_type(lt) == 1
+        # All array kinds expose `_new` / `_length` / `_get` / `_push` with
+        # the same shape, so the repeat loop is a single template
+        # parameterized by the C prefix.
+        mark_array_runtime_needs(lt)
+        @needs_gc = 1
+        pfx = array_c_prefix(lt)
+        tmp = new_temp
+        src = new_temp
+        cnt = new_temp
+        emit("  sp_" + pfx + " *" + src + " = " + compile_expr(recv) + ";")
+        emit("  mrb_int " + cnt + " = " + compile_arg0(nid) + ";")
+        emit("  sp_" + pfx + " *" + tmp + " = sp_" + pfx + "_new();")
+        emit("  { mrb_int _mi; mrb_int _sl = sp_" + pfx + "_length(" + src + "); for (_mi = 0; _mi < " + cnt + "; _mi++) { mrb_int _mj; for (_mj = 0; _mj < _sl; _mj++) sp_" + pfx + "_push(" + tmp + ", sp_" + pfx + "_get(" + src + ", _mj)); } }")
+        return tmp
       end
       return "(" + compile_expr(recv) + " * " + compile_arg0(nid) + ")"
     end
