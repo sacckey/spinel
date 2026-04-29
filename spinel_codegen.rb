@@ -7111,10 +7111,7 @@ class Compiler
       @needs_gc = 1
       @needs_str_array = 1
     end
-    if t == "InterpolatedStringNode"
-    end
-    if t == "SymbolNode"
-    end
+
     if t == "GlobalVariableWriteNode"
       gname = @nd_name[nid]
       if gname != "$stderr" && gname != "$stdout" && gname != "$?"
@@ -7185,8 +7182,7 @@ class Compiler
           end
         end
       end
-      if mname == "[]"
-      end
+
       if mname == "new"
         if @nd_receiver[nid] >= 0
           if @nd_type[@nd_receiver[nid]] == "ConstantReadNode"
@@ -7298,10 +7294,7 @@ class Compiler
           rn = @nd_name[@nd_receiver[nid]]
           if rn == "File"
             @needs_file_io = 1
-            if mname == "join"
-            end
-            if mname == "basename"
-            end
+
           end
         end
       end
