@@ -910,6 +910,23 @@ class Compiler
         end
         i = i + 1
       end
+      return -1
+    end
+    # A constant initialized to a regex literal forwards to the
+    # underlying pattern, so `RX = /pat/; RX.match?(s)` and
+    # `s =~ RX` dispatch to the engine instead of falling through
+    # to the literal-`(-1)` / `sp_str_include` fallbacks.
+    if @nd_type[nid] == "ConstantReadNode"
+      cname = resolve_const_ref_name(nid)
+      if cname != ""
+        ci = find_const_idx(cname)
+        if ci >= 0 && ci < @const_expr_ids.length
+          eid = @const_expr_ids[ci]
+          if eid >= 0 && @nd_type[eid] == "RegularExpressionNode"
+            return find_regexp_index(eid)
+          end
+        end
+      end
     end
     -1
   end
@@ -13268,6 +13285,27 @@ class Compiler
       if constructor_class_name(recv) == "Fiber"
         @needs_fiber = 1
         return "sp_fiber_current"
+      end
+    end
+
+    # regex.match? / regex.match / regex =~ str  — receiver is the regex
+    # (typically a constant referring to a /…/ literal). Dispatched here
+    # rather than compile_string_method_expr, which wants a string
+    # receiver.
+    if recv >= 0 && (mname == "match?" || mname == "=~" || mname == "match")
+      ridx = find_regexp_index(recv)
+      if ridx >= 0
+        args_id = @nd_arguments[nid]
+        if args_id >= 0
+          arg_ids = get_args(args_id)
+          if arg_ids.length > 0
+            sc = compile_expr(arg_ids[0])
+            if mname == "match?"
+              return "sp_re_match_p(sp_re_pat_" + ridx.to_s + ", " + sc + ")"
+            end
+            return "sp_re_match(sp_re_pat_" + ridx.to_s + ", " + sc + ")"
+          end
+        end
       end
     end
 
